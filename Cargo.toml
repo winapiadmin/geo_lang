@@ -1,0 +1,8 @@
+[package]
+name = "geo_lang"
+version = "0.1.0"
+edition = "2021"
+description = "A proof checker and prover for the .geo geometry language"
+
+[profile.release]
+opt-level = 3
