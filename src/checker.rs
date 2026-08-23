@@ -715,6 +715,7 @@ fn process_construction(
             let _ = lpos;
         }
         Geom::Ref(_) => {}
+        Geom::ParallelLine { .. } => {}
     }
     let _ = pos;
 }

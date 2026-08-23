@@ -101,6 +101,10 @@ pub enum Claim {
     PredVal { name: String, args: Vec<String>, value: Value },
     /// Incidence: a point lying on a segment/line, e.g. `On(D, BC)`.
     On(String, String),
+    /// Point lies on a finite segment (used by numeric solver for segment addition).
+    OnSegment(String, String),
+    /// Point lies on an infinite line (used by numeric solver for Pythagoras).
+    OnLine(String, String),
     /// Derived from `Triangle(A,B,C,[isoscelesAt=A])`: apex of a triangle.
     IsoscelesAt(String, String),
     /// Equality of two triangles, e.g. `ABC = MNP`. Each triangle's vertices
@@ -131,6 +135,15 @@ impl Claim {
         let mut chars: Vec<char> = r.to_lowercase().chars().collect();
         chars.sort_unstable();
         chars.into_iter().collect()
+    }
+
+    /// Split a two-character segment reference into its two endpoint names.
+    /// Returns a vector of single-character strings (e.g., "bc" -> ["b", "c"]).
+    pub fn split_ref_names(seg: &str) -> Vec<String> {
+        seg.to_lowercase()
+            .chars()
+            .map(|c| c.to_string())
+            .collect()
     }
 
     /// Build a segment-equality claim from raw refs.
@@ -268,6 +281,8 @@ impl Claim {
             Claim::SegEq(a, b) => a.is_empty() || b.is_empty(),
             Claim::PredVal { args, .. } => args.iter().any(|a| a.is_empty()),
             Claim::On(p, s) => p.is_empty() || s.is_empty(),
+            Claim::OnSegment(p, s) => p.is_empty() || s.is_empty(),
+            Claim::OnLine(p, s) => p.is_empty() || s.is_empty(),
             Claim::IsoscelesAt(t, a) => t.is_empty() || a.is_empty(),
             Claim::TriEq(lhs, rhs) => lhs.is_empty() || rhs.is_empty(),
             Claim::AngleEq(lhs, rhs) => lhs.is_empty() || rhs.is_empty(),
@@ -349,6 +364,8 @@ impl fmt::Display for Claim {
                 }
             }
             Claim::On(p, s) => write!(f, "On({},{})", render_ref(p), render_ref(s)),
+            Claim::OnSegment(p, s) => write!(f, "OnSegment({},{})", render_ref(p), render_ref(s)),
+            Claim::OnLine(p, s) => write!(f, "OnLine({},{})", render_ref(p), render_ref(s)),
             Claim::IsoscelesAt(t, a) => {
                 write!(f, "IsoscelesAt({},{})", render_ref(t), render_ref(a))
             }
