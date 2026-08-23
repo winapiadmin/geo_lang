@@ -15,7 +15,10 @@ type Toks = Vec<Token>;
 
 pub fn parse(source: &str, src_text: &str) -> Result<File, ParseError> {
     let toks = crate::token::tokenize(src_text).map_err(|e| ParseError {
-        pos: Pos { line: e.line, col: e.col },
+        pos: Pos {
+            line: e.line,
+            col: e.col,
+        },
         msg: e.msg,
     })?;
     let lines: Vec<String> = src_text.lines().map(|l| l.to_string()).collect();
@@ -35,11 +38,18 @@ struct Line {
 
 impl Parser {
     fn new(source: &str, lines: Vec<String>, toks: Toks) -> Parser {
-        Parser { source: source.into(), lines, toks }
+        Parser {
+            source: source.into(),
+            lines,
+            toks,
+        }
     }
 
     fn err<T>(&self, pos: Pos, msg: &str) -> Result<T, ParseError> {
-        Err(ParseError { pos, msg: msg.into() })
+        Err(ParseError {
+            pos,
+            msg: msg.into(),
+        })
     }
 
     /// Split the token stream into logical lines (statements are line-based).
@@ -57,7 +67,9 @@ impl Parser {
                         continue;
                     }
                     if !cur.is_empty() {
-                        out.push(Line { toks: std::mem::take(&mut cur) });
+                        out.push(Line {
+                            toks: std::mem::take(&mut cur),
+                        });
                     }
                 }
                 TokKind::Symbol('(') => {
@@ -149,6 +161,20 @@ impl Parser {
                         file.goals.push(goal);
                         continue;
                     }
+                    // A `->` continuation line extends the previous step's
+                    // chain, so a proof may be written across several lines:
+                    //   a -> B
+                    //     -> C
+                    if is_arrow_start(&line) {
+                        if let Some(p) = in_proof.as_mut() {
+                            self.continue_chain(p, &line)?;
+                            continue;
+                        }
+                        return self.err(
+                            pos_of(&line.toks[0]),
+                            "`->` continuation outside of a proof block",
+                        );
+                    }
                     // Otherwise: a proof step (only valid inside a proof block).
                     if let Some(p) = in_proof.as_mut() {
                         let step = self.parse_step(&line)?;
@@ -179,11 +205,7 @@ impl Parser {
 
     // ---- input statements ----
 
-    fn parse_input_stmt(
-        &self,
-        line: &Line,
-        out: &mut Vec<InputStmt>,
-    ) -> Result<(), ParseError> {
+    fn parse_input_stmt(&self, line: &Line, out: &mut Vec<InputStmt>) -> Result<(), ParseError> {
         let t = &line.toks[0];
         let pos = pos_of(t);
         if let TokKind::Ident(id) = &t.kind {
@@ -195,16 +217,14 @@ impl Parser {
                     return Ok(());
                 }
                 "segment" => {
-                    let stmt = self.parse_pair_stmt(line, |a, b, pos| {
-                        InputStmt::Segment { a, b, pos }
-                    })?;
+                    let stmt =
+                        self.parse_pair_stmt(line, |a, b, pos| InputStmt::Segment { a, b, pos })?;
                     out.push(stmt);
                     return Ok(());
                 }
                 "line" => {
-                    let stmt = self.parse_pair_stmt(line, |a, b, pos| {
-                        InputStmt::Line { a, b, pos }
-                    })?;
+                    let stmt =
+                        self.parse_pair_stmt(line, |a, b, pos| InputStmt::Line { a, b, pos })?;
                     out.push(stmt);
                     return Ok(());
                 }
@@ -257,7 +277,8 @@ impl Parser {
                         expect_symbol(toks, &mut k, '=')?;
                         let rhs = self.parse_ratio_expr(toks, &mut k)?;
                         if k != toks.len() {
-                            return self.err(pos_of(&toks[k]), "unexpected tokens in ratio equality");
+                            return self
+                                .err(pos_of(&toks[k]), "unexpected tokens in ratio equality");
                         }
                         out.push(InputStmt::RatioEq { lhs, rhs, pos });
                         return Ok(());
@@ -268,15 +289,27 @@ impl Parser {
                         let mut k = 0usize;
                         let atom = self.parse_claim_atom(toks, &mut k)?;
                         if k != toks.len() {
-                            return self.err(pos_of(&toks[k]), "unexpected tokens in predicate fact");
+                            return self
+                                .err(pos_of(&toks[k]), "unexpected tokens in predicate fact");
                         }
                         let stmt = match atom {
-                            ClaimExpr::PredEq { name, args, value, pos } => {
-                                InputStmt::PredFact { name, args, value, pos }
-                            }
-                            ClaimExpr::PredCall { name, args, pos } => {
-                                InputStmt::PredFact { name, args, value: Value::Bool(true), pos }
-                            }
+                            ClaimExpr::PredEq {
+                                name,
+                                args,
+                                value,
+                                pos,
+                            } => InputStmt::PredFact {
+                                name,
+                                args,
+                                value,
+                                pos,
+                            },
+                            ClaimExpr::PredCall { name, args, pos } => InputStmt::PredFact {
+                                name,
+                                args,
+                                value: Value::Bool(true),
+                                pos,
+                            },
                             ClaimExpr::EqChain { items, pos } => InputStmt::EqChain { items, pos },
                             other => {
                                 return self.err(
@@ -291,7 +324,10 @@ impl Parser {
                 }
             }
         }
-        self.err(pos, "expected a Triangle, Segment, Line, or `name = ...` construction")
+        self.err(
+            pos,
+            "expected a Triangle, Segment, Line, or `name = ...` construction",
+        )
     }
 
     fn parse_triangle(&self, line: &Line) -> Result<InputStmt, ParseError> {
@@ -327,9 +363,17 @@ impl Parser {
         }
         expect_symbol(toks, &mut k, ')')?;
         if k != toks.len() {
-            return self.err(pos_of(&toks[k]), "unexpected tokens in Triangle declaration");
+            return self.err(
+                pos_of(&toks[k]),
+                "unexpected tokens in Triangle declaration",
+            );
         }
-        Ok(InputStmt::Triangle { name, points, props, pos })
+        Ok(InputStmt::Triangle {
+            name,
+            points,
+            props,
+            pos,
+        })
     }
 
     fn parse_pair_stmt<F>(&self, line: &Line, make: F) -> Result<InputStmt, ParseError>
@@ -393,10 +437,7 @@ impl Parser {
                     }
                     expect_first_symbol(toks, ')')?;
                     if geoms.len() < 2 {
-                        return self.err(
-                            pos,
-                            "Intersection requires more than 1 segment or line",
-                        );
+                        return self.err(pos, "Intersection requires more than 1 segment or line");
                     }
                     Ok(Geom::Intersection(geoms, pos))
                 }
@@ -408,6 +449,15 @@ impl Parser {
                     let base = expect_first_ident(toks)?;
                     expect_first_symbol(toks, ')')?;
                     Ok(Geom::PerpendicularLine { point, base, pos })
+                }
+                "parallelline" => {
+                    toks.remove(0);
+                    expect_first_symbol(toks, '(')?;
+                    let point = expect_first_ident(toks)?;
+                    expect_first_symbol(toks, ',')?;
+                    let base = expect_first_ident(toks)?;
+                    expect_first_symbol(toks, ')')?;
+                    Ok(Geom::ParallelLine { point, base, pos })
                 }
                 "midpoint" => {
                     toks.remove(0);
@@ -423,13 +473,15 @@ impl Parser {
                         // Midpoint(BC): a single segment reference, split
                         // into its two endpoint points.
                         expect_first_symbol(toks, ')')?;
-                        if first.chars().count() != 2 {
+                        let names = crate::claim::Claim::split_ref_names(&first);
+                        if names.len() != 2 {
                             return self.err(pos, "Midpoint(Segment) requires a two-point segment such as `Midpoint(BC)`");
                         }
-                        let mut chars = first.chars();
-                        let a = chars.next().unwrap().to_string();
-                        let b = chars.next().unwrap().to_string();
-                        Ok(Geom::Midpoint { a, b, pos })
+                        Ok(Geom::Midpoint {
+                            a: names[0].clone(),
+                            b: names[1].clone(),
+                            pos,
+                        })
                     }
                 }
                 "anglebisector" => {
@@ -516,14 +568,25 @@ impl Parser {
             if k + 1 != toks.len() {
                 return self.err(pos_of(&toks[k + 1]), "unexpected tokens after `Nothing`");
             }
-            return Ok(Goal { index, claim: None, pos });
+            return Ok(Goal {
+                index,
+                claim: None,
+                pos,
+            });
         }
         let mut claims = Vec::new();
         self.parse_chain(toks, &mut k, &mut claims)?;
+        if k != toks.len() {
+            return self.err(pos_of(&toks[k]), "unexpected tokens after goal");
+        }
         if claims.len() != 1 {
             return self.err(pos, "a goal must be a single claim");
         }
-        Ok(Goal { index, claim: Some(claims[0].clone()), pos })
+        Ok(Goal {
+            index,
+            claim: Some(claims[0].clone()),
+            pos,
+        })
     }
 
     fn parse_proof_prop(&self, line: &Line) -> Result<ProofProp, ParseError> {
@@ -581,7 +644,11 @@ impl Parser {
         if k != toks.len() {
             return self.err(pos_of(&toks[k]), "unexpected tokens after proof header");
         }
-        Ok(ProofBlock { index, steps: Vec::new(), pos })
+        Ok(ProofBlock {
+            index,
+            steps: Vec::new(),
+            pos,
+        })
     }
 
     fn parse_step(&self, line: &Line) -> Result<Step, ParseError> {
@@ -592,7 +659,37 @@ impl Parser {
         let mut claims = Vec::new();
         let mut k = 0;
         self.parse_chain(&line.toks, &mut k, &mut claims)?;
+        if k != line.toks.len() {
+            return self.err(pos_of(&line.toks[k]), "unexpected tokens after proof step");
+        }
         Ok(Step::Chain { claims, pos })
+    }
+
+    /// Extend the previous step's chain with the claims after a leading `->`,
+    /// so multi-line proofs like `a -> B` / `  -> C` form one chain.
+    fn continue_chain(&self, block: &mut ProofBlock, line: &Line) -> Result<(), ParseError> {
+        let last = match block.steps.pop() {
+            Some(s) => s,
+            None => return self.err(pos_of(&line.toks[0]), "`->` continuation with no preceding step"),
+        };
+        match last {
+            Step::Chain { mut claims, pos } => {
+                let toks = &line.toks;
+                let mut k = 1; // skip the leading `->`
+                if k >= toks.len() {
+                    return self.err(pos_of(&toks[0]), "`->` continuation needs a claim");
+                }
+                self.parse_chain(toks, &mut k, &mut claims)?;
+                if k != toks.len() {
+                    return self.err(pos_of(&toks[k]), "unexpected tokens after proof step");
+                }
+                block.steps.push(Step::Chain { claims, pos });
+                Ok(())
+            }
+            Step::Nothing(_) => {
+                self.err(pos_of(&line.toks[0]), "`->` continuation cannot follow `Nothing`")
+            }
+        }
     }
 
     // ---- claims ----
@@ -664,7 +761,10 @@ impl Parser {
         if *k < toks.len() && is_symbol(&toks[*k], '/') {
             *k += 1;
             let den = self.parse_ratio_atom(toks, k)?;
-            let lhs = RatioExpr::Quot { num: RatioAtom::Seg(name), den };
+            let lhs = RatioExpr::Quot {
+                num: RatioAtom::Seg(name),
+                den,
+            };
             expect_symbol(toks, k, '=')?;
             let rhs = self.parse_ratio_expr(toks, k)?;
             return Ok(ClaimExpr::RatioEq { lhs, rhs, pos });
@@ -738,7 +838,12 @@ impl Parser {
             if *k < toks.len() && is_symbol(&toks[*k], '=') {
                 *k += 1;
                 let value = parse_value_at(toks, k)?;
-                return Ok(ClaimExpr::PredEq { name, args, value, pos });
+                return Ok(ClaimExpr::PredEq {
+                    name,
+                    args,
+                    value,
+                    pos,
+                });
             }
             return Ok(ClaimExpr::PredCall { name, args, pos });
         }
@@ -783,7 +888,12 @@ impl Parser {
     }
 
     /// An optional `^2` suffix after a length expression, e.g. `BD^2`.
-    fn parse_sq_suffix(&self, toks: &[Token], k: &mut usize, base: LenExpr) -> Result<LenExpr, ParseError> {
+    fn parse_sq_suffix(
+        &self,
+        toks: &[Token],
+        k: &mut usize,
+        base: LenExpr,
+    ) -> Result<LenExpr, ParseError> {
         if *k < toks.len() && is_symbol(&toks[*k], '^') {
             *k += 1;
             let t2 = toks.get(*k).ok_or(ParseError {
@@ -883,7 +993,10 @@ impl Parser {
 // ---- helpers ----
 
 fn pos_of(t: &Token) -> Pos {
-    Pos { line: t.line, col: t.col }
+    Pos {
+        line: t.line,
+        col: t.col,
+    }
 }
 
 fn is_symbol(t: &Token, s: char) -> bool {
@@ -902,6 +1015,7 @@ fn is_construction_word(id: &str) -> bool {
         "intersection"
             | "perpendicularline"
             | "prependicularline"
+            | "parallelline"
             | "midpoint"
             | "anglebisector"
             | "altitude"
@@ -1027,10 +1141,12 @@ fn parse_value_at(toks: &[Token], k: &mut usize) -> Result<Value, ParseError> {
 
 // ---- line classification ----
 
+fn is_arrow_start(line: &Line) -> bool {
+    matches!(line.toks.first().map(|t| &t.kind), Some(TokKind::Arrow))
+}
+
 fn is_proof_header(line: &Line) -> bool {
-    line.toks.len() >= 3
-        && is_ident_word(&line.toks[0], "proof")
-        && is_symbol(&line.toks[1], '[')
+    line.toks.len() >= 3 && is_ident_word(&line.toks[0], "proof") && is_symbol(&line.toks[1], '[')
 }
 
 fn is_proof_property(line: &Line) -> bool {

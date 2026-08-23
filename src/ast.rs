@@ -50,7 +50,7 @@ impl LenExpr {
     pub fn numeric(&self) -> Option<u32> {
         match self {
             LenExpr::Num(n) => Some(*n),
-            LenExpr::Sq(inner) => inner.numeric().map(|n| n * n),
+            LenExpr::Sq(inner) => inner.numeric().and_then(|n| n.checked_mul(n)),
             _ => None,
         }
     }
@@ -62,10 +62,7 @@ impl LenExpr {
 pub enum ClaimExpr {
     /// An equality (possibly chained) of length expressions, e.g.
     /// `BD=DC` or `Distance(B,D)=Distance(C,D)=Distance(A,D)`.
-    EqChain {
-        items: Vec<LenExpr>,
-        pos: Pos,
-    },
+    EqChain { items: Vec<LenExpr>, pos: Pos },
     PredEq {
         name: String,
         args: Vec<String>,
@@ -78,32 +75,17 @@ pub enum ClaimExpr {
         pos: Pos,
     },
     /// A parenthesized conjunction such as `(A && B)` used as a premise.
-    Conj {
-        items: Vec<ClaimExpr>,
-        pos: Pos,
-    },
+    Conj { items: Vec<ClaimExpr>, pos: Pos },
     /// Equality of two triangles, e.g. `ABC = MNP`. The user's vertex order
     /// is preserved for display; semantically, permutations of either side
     /// are equivalent.
-    TriEq {
-        lhs: String,
-        rhs: String,
-        pos: Pos,
-    },
+    TriEq { lhs: String, rhs: String, pos: Pos },
     /// Equality of two triangles written with the `Triangle(...)` wrapper,
     /// e.g. `Triangle(ABC)=Triangle(MNP)` (used to disambiguate from angle
     /// equalities such as `Angle(ABC)=Angle(MNP)`).
-    TriCall {
-        lhs: String,
-        rhs: String,
-        pos: Pos,
-    },
+    TriCall { lhs: String, rhs: String, pos: Pos },
     /// Equality of two angles, e.g. `Angle(ABC)=Angle(MNP)`.
-    AngleEq {
-        lhs: String,
-        rhs: String,
-        pos: Pos,
-    },
+    AngleEq { lhs: String, rhs: String, pos: Pos },
     /// Equality of two ratios, e.g. `BD/DC = AB/AC`.
     RatioEq {
         lhs: RatioExpr,
@@ -136,23 +118,58 @@ pub enum Geom {
     /// Throws when the operands are parallel (no intersection) or coincident
     /// (multiple intersections).
     Intersection(Vec<Geom>, Pos),
-    PerpendicularLine { point: String, base: String, pos: Pos },
-    Midpoint { a: String, b: String, pos: Pos },
+    PerpendicularLine {
+        point: String,
+        base: String,
+        pos: Pos,
+    },
+    /// The line through `point` parallel to `base`, e.g. `L = ParallelLine(A, BC)`.
+    /// Throws when `point` already lies on `base` (the line would be undefined).
+    ParallelLine {
+        point: String,
+        base: String,
+        pos: Pos,
+    },
+    Midpoint {
+        a: String,
+        b: String,
+        pos: Pos,
+    },
     /// The foot where the angle bisector at `vertex` meets the opposite
     /// segment `base`, e.g. `D = AngleBisector(A, BC)`.
-    AngleBisector { vertex: String, base: String, pos: Pos },
+    AngleBisector {
+        vertex: String,
+        base: String,
+        pos: Pos,
+    },
     /// The perpendicular foot from `vertex` to `base`,
     /// e.g. `H = Altitude(A, BC)`.
-    Altitude { vertex: String, base: String, pos: Pos },
+    Altitude {
+        vertex: String,
+        base: String,
+        pos: Pos,
+    },
     /// A triangle center: circumcenter/incenter/orthocenter/centroid.
-    Center { kind: CenterKind, tri: String, pos: Pos },
+    Center {
+        kind: CenterKind,
+        tri: String,
+        pos: Pos,
+    },
     /// An infinite line through two points, e.g. `L = Line(A, B)` or the
     /// operand of `PointOn(Line(A, B))`.
-    Line { a: String, b: String, pos: Pos },
+    Line {
+        a: String,
+        b: String,
+        pos: Pos,
+    },
     /// An arbitrary point on a segment or line, e.g. `D = PointOn(AB)` or
     /// `M = PointOn(Line(H, E))`. `line_pts` is set when the operand was an
     /// explicit `Line(a, b)` (so the endpoints are also known to lie on it).
-    PointOn { seg: String, line_pts: Option<(String, String)>, pos: Pos },
+    PointOn {
+        seg: String,
+        line_pts: Option<(String, String)>,
+        pos: Pos,
+    },
 }
 
 /// The kind of a triangle-center construction.
@@ -171,6 +188,7 @@ impl Geom {
             Geom::Ref(_) => Pos { line: 0, col: 0 },
             Geom::Intersection(_, pos)
             | Geom::PerpendicularLine { pos, .. }
+            | Geom::ParallelLine { pos, .. }
             | Geom::Midpoint { pos, .. }
             | Geom::AngleBisector { pos, .. }
             | Geom::Altitude { pos, .. }

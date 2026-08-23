@@ -27,6 +27,16 @@ struct NumStep {
     inputs: Vec<Claim>,
 }
 
+/// Two numeric facts (or derivations) assigned different lengths to the same
+/// segment. The solver keeps the first value it saw and records the conflict
+/// rather than silently overwriting it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LenConflict {
+    pub seg: String,
+    pub old: u32,
+    pub new: u32,
+}
+
 #[derive(Debug, Default)]
 pub struct NumericEnv {
     /// Direct lengths: `norm_seg -> length`.
@@ -37,6 +47,16 @@ pub struct NumericEnv {
     len_steps: HashMap<String, NumStep>,
     /// Derivation of each known squared length.
     sq_steps: HashMap<String, NumStep>,
+    /// Contradictory assignments detected while solving. The solver keeps the
+    /// first value and records the contradiction here instead of silently
+    /// choosing whichever fact was processed last.
+    pub conflicts: Vec<LenConflict>,
+}
+
+impl NumericEnv {
+    pub fn conflicts(&self) -> &[LenConflict] {
+        &self.conflicts
+    }
 }
 
 fn gcd(mut a: u32, mut b: u32) -> u32 {
@@ -48,12 +68,14 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
     a.max(1)
 }
 
+/// Integer square root via `u64` so the intermediate `r * r` cannot overflow.
 fn isqrt(n: u32) -> Option<u32> {
-    let r = (n as f64).sqrt() as u32;
-    if r * r == n {
-        Some(r)
-    } else if (r + 1) * (r + 1) == n {
-        Some(r + 1)
+    let v = n as u64;
+    let r = (v as f64).sqrt() as u64;
+    if r * r == v {
+        Some(r as u32)
+    } else if (r + 1) * (r + 1) == v {
+        Some((r + 1) as u32)
     } else {
         None
     }
@@ -74,34 +96,58 @@ fn seg_of(a: char, b: char) -> String {
 
 fn record_len(env: &mut NumericEnv, seg: &str, n: u32, rule: &'static str, inputs: Vec<Claim>) {
     let s = Claim::norm_seg(seg);
-    if env.lens.get(&s).copied() != Some(n) {
-        env.lens.insert(s.clone(), n);
+    if let Some(old) = env.lens.get(&s).copied() {
+        if old != n {
+            env.conflicts.push(LenConflict {
+                seg: s,
+                old,
+                new: n,
+            });
+        }
+        // Keep the first value and its derivation; never silently overwrite.
+        return;
     }
-    env.sq.insert(s.clone(), n * n);
-    env.len_steps
-        .entry(s)
-        .or_insert(NumStep { rule, inputs });
+    env.lens.insert(s.clone(), n);
+    if let Some(sq) = n.checked_mul(n) {
+        env.sq.insert(s.clone(), sq);
+    }
+    env.len_steps.insert(s, NumStep { rule, inputs });
 }
 
 fn record_sq(env: &mut NumericEnv, seg: &str, v: u32, rule: &'static str, inputs: Vec<Claim>) {
     let s = Claim::norm_seg(seg);
     let had_len = env.lens.get(&s).is_some();
-    if env.sq.get(&s).copied() != Some(v) {
-        env.sq.insert(s.clone(), v);
-    }
-    if let Some(r) = isqrt(v) {
-        if env.lens.get(&s).copied() != Some(r) {
-            env.lens.insert(s.clone(), r);
+    match env.sq.get(&s).copied() {
+        Some(old) if old != v => {
+            env.conflicts.push(LenConflict {
+                seg: s,
+                old,
+                new: v,
+            });
+            return;
+        }
+        Some(_) => {}
+        None => {
+            env.sq.insert(s.clone(), v);
+            if !had_len {
+                env.sq_steps
+                    .entry(s.clone())
+                    .or_insert(NumStep { rule, inputs });
+            }
         }
     }
-    // Only keep a *derivation* for the square when the segment's length is
-    // not directly known: otherwise the square is trivially the length
-    // squared, and keeping a Pythagoras step for it could create a circular
-    // explanation (e.g. AB^2 = BH^2 + AH^2 re-using the BH^2 it helped find).
-    if !had_len {
-        env.sq_steps
-            .entry(s)
-            .or_insert(NumStep { rule, inputs });
+    if let Some(r) = isqrt(v) {
+        if let Some(old) = env.lens.get(&s).copied() {
+            if old != r {
+                env.conflicts.push(LenConflict {
+                    seg: s,
+                    old,
+                    new: r,
+                });
+            }
+        } else {
+            env.lens.insert(s, r);
+        }
     }
 }
 
@@ -121,8 +167,20 @@ pub fn compute(facts: &FactStore) -> NumericEnv {
             // Direct inputs: keep a `given` step so later derivations cannot
             // overwrite them (which could introduce circular explanations).
             let s = Claim::norm_seg(&seg);
+            if let Some(old) = env.lens.get(&s).copied() {
+                if old != n {
+                    env.conflicts.push(LenConflict {
+                        seg: s,
+                        old,
+                        new: n,
+                    });
+                }
+                continue;
+            }
             env.lens.insert(s.clone(), n);
-            env.sq.insert(s.clone(), n * n);
+            if let Some(sq) = n.checked_mul(n) {
+                env.sq.insert(s.clone(), sq);
+            }
             env.len_steps.insert(
                 s,
                 NumStep {
@@ -134,10 +192,11 @@ pub fn compute(facts: &FactStore) -> NumericEnv {
     }
 
     let claims = facts.all();
-    // Points lying on each segment (line), including the segment endpoints.
+    // Points lying on each line, including the segment endpoints. Any of the
+    // three incidence kinds implies the point is on the infinite line.
     let mut on: HashMap<String, Vec<char>> = HashMap::new();
     for c in &claims {
-        if let Claim::On(p, s) = c {
+        if let Claim::On(p, s) | Claim::OnSegment(p, s) | Claim::OnLine(p, s) = c {
             if let Some((a, b)) = norm_pts(s) {
                 let key = seg_of(a, b);
                 let pch = Claim::norm_ref(p).chars().next().unwrap_or('\0');
@@ -160,11 +219,7 @@ pub fn compute(facts: &FactStore) -> NumericEnv {
     env
 }
 
-fn propagate(
-    env: &mut NumericEnv,
-    claims: &[Claim],
-    on: &HashMap<String, Vec<char>>,
-) {
+fn propagate(env: &mut NumericEnv, claims: &[Claim], on: &HashMap<String, Vec<char>>) {
     // Segment equality propagates lengths.
     for c in claims {
         if let Claim::SegEq(a, b) = c {
@@ -218,9 +273,12 @@ fn propagate(
     }
 
     // Segment addition: for a point `p` on segment `ab`, len(ab) is the sum
-    // (or difference) of the two sub-segments.
+    // (or difference) of the two sub-segments. Only *finite-segment*
+    // incidence is used: a point on the infinite line (e.g. a reflection on
+    // the extension of a segment) does not lie within the segment, so
+    // treating it as an interior point could derive a false length.
     for c in claims {
-        if let Claim::On(p, s) = c {
+        if let Claim::OnSegment(p, s) = c {
             if let Some((a, b)) = norm_pts(s) {
                 let ab = seg_of(a, b);
                 let pch = Claim::norm_ref(p).chars().next().unwrap_or('\0');
@@ -228,13 +286,17 @@ fn propagate(
                     let ap = seg_of(a, pch);
                     let pb = seg_of(pch, b);
                     match (get_len(env, &ap), get_len(env, &pb)) {
-                        (Some(x), Some(y)) => record_len(
-                            env,
-                            &ab,
-                            x + y,
-                            "segment-addition",
-                            vec![Claim::len_eq(&ap, x), Claim::len_eq(&pb, y)],
-                        ),
+                        (Some(x), Some(y)) => {
+                            if let Some(sum) = x.checked_add(y) {
+                                record_len(
+                                    env,
+                                    &ab,
+                                    sum,
+                                    "segment-addition",
+                                    vec![Claim::len_eq(&ap, x), Claim::len_eq(&pb, y)],
+                                );
+                            }
+                        }
                         _ => {}
                     }
                     if let Some(ab_len) = get_len(env, &ab) {
@@ -307,22 +369,26 @@ fn propagate(
                 let hyp = seg_of(other, p);
                 // leg_other^2 + leg_p^2 = hyp^2
                 let l1 = get_len(env, &leg_other)
-                    .map(|n| n * n)
+                    .and_then(|n| n.checked_mul(n))
                     .or_else(|| get_sq(env, &leg_other));
                 let l2 = get_len(env, &leg_p)
-                    .map(|n| n * n)
+                    .and_then(|n| n.checked_mul(n))
                     .or_else(|| get_sq(env, &leg_p));
                 let h = get_len(env, &hyp)
-                    .map(|n| n * n)
+                    .and_then(|n| n.checked_mul(n))
                     .or_else(|| get_sq(env, &hyp));
                 match (l1, l2, h) {
-                    (Some(a), Some(b), _) => record_sq(
-                        env,
-                        &hyp,
-                        a + b,
-                        "pythagoras",
-                        vec![Claim::sq_eq(&leg_other, a), Claim::sq_eq(&leg_p, b)],
-                    ),
+                    (Some(a), Some(b), _) => {
+                        if let Some(sq) = a.checked_add(b) {
+                            record_sq(
+                                env,
+                                &hyp,
+                                sq,
+                                "pythagoras",
+                                vec![Claim::sq_eq(&leg_other, a), Claim::sq_eq(&leg_p, b)],
+                            );
+                        }
+                    }
                     (Some(a), _, Some(c)) if c > a => record_sq(
                         env,
                         &leg_p,
@@ -450,12 +516,15 @@ const EXPLAIN_LIMIT: usize = 64;
 /// True if `key` is already being explained on the current path, i.e. the
 /// derivation would be circular. We truncate rather than recurse so the proof
 /// tree can never blow up exponentially.
-fn guard(seg: &str, key: &str, path: &mut Vec<String>) -> Option<Proof> {
+///
+/// The returned node is an explicit truncation marker, not a real derivation:
+/// it must not fabricate a numeric fact (`seg=0` would be a false claim).
+fn guard(seg: &str, key: &str, path: &mut Vec<String>, target: u32) -> Option<Proof> {
     if path.len() > EXPLAIN_LIMIT || path.iter().any(|k| k == key) {
         Some(Proof {
-            claim: Claim::len_eq(seg, 0),
+            claim: Claim::len_eq(seg, target),
             antecedents: Vec::new(),
-            rule: Some("..."),
+            rule: Some("[circular derivation truncated]"),
         })
     } else {
         None
@@ -464,7 +533,7 @@ fn guard(seg: &str, key: &str, path: &mut Vec<String>) -> Option<Proof> {
 
 fn explain_len_d(env: &NumericEnv, seg: &str, n: u32, path: &mut Vec<String>) -> Proof {
     let k = Claim::norm_seg(seg);
-    if let Some(p) = guard(seg, &format!("L:{k}"), path) {
+    if let Some(p) = guard(seg, &format!("L:{k}"), path, n) {
         return p;
     }
     path.push(format!("L:{k}"));
@@ -528,7 +597,7 @@ fn explain_sq_d(env: &NumericEnv, seg: &str, v: u32, path: &mut Vec<String>) -> 
         return Proof {
             claim: Claim::sq_eq(seg, v),
             antecedents: Vec::new(),
-            rule: Some("..."),
+            rule: Some("[circular derivation truncated]"),
         };
     }
     path.push(key);

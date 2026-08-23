@@ -86,7 +86,10 @@ impl Diagnostic {
 /// so `GoalNotProven`, `goal-not-proven` and `goalnotproven` all match the
 /// diagnostic kind `goal-not-proven`.
 fn normalize_name(n: &str) -> String {
-    n.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect()
+    n.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
 }
 
 /// Downgrade diagnostics whose kind is listed in `names` (the `-e:` bypass)
