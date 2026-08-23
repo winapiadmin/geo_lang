@@ -98,10 +98,6 @@ pub fn prove(
     rules: &[Rule],
     depth: usize,
 ) -> Option<Proof> {
-    if depth == 0 {
-        let saturated = forward_saturate(facts, rules);
-        return prove_inner(goal, &saturated, rules, depth);
-    }
     prove_inner(goal, facts, rules, depth)
 }
 

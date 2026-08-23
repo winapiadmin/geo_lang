@@ -333,8 +333,10 @@ fn process_input(
             let seg = Claim::norm_seg(&format!("{}{}", a, b));
             let an = Claim::norm_ref(a);
             let bn = Claim::norm_ref(b);
-            facts.add(Claim::On(an, seg.clone()), Origin::Input);
-            facts.add(Claim::On(bn, seg.clone()), Origin::Input);
+            facts.add(Claim::On(an.clone(), seg.clone()), Origin::Input);
+            facts.add(Claim::On(bn.clone(), seg.clone()), Origin::Input);
+            facts.add(Claim::OnSegment(an, seg.clone()), Origin::Input);
+            facts.add(Claim::OnSegment(bn, seg), Origin::Input);
             let _ = pos;
         }
         InputStmt::Line { a, b, pos } => {
@@ -555,12 +557,16 @@ fn process_construction(
                 match g {
                     Geom::Ref(r) => {
                         if r.chars().count() == 2 {
-                            facts.add(Claim::On(n.clone(), Claim::norm_seg(r)), Origin::Input);
+                            let seg_n = Claim::norm_seg(r);
+                            facts.add(Claim::On(n.clone(), seg_n.clone()), Origin::Input);
+                            facts.add(Claim::OnSegment(n.clone(), seg_n), Origin::Input);
                         } else if let Some((point, base)) = known.get(&Claim::norm_ref(r)) {
                             // A named perpendicular line `L = PerpendicularLine(point, base)`:
                             // the intersection point lies on the base, and the
                             // segment from `point` to it is perpendicular to the base.
-                            facts.add(Claim::On(n.clone(), Claim::norm_seg(base)), Origin::Input);
+                            let base_n = Claim::norm_seg(base);
+                            facts.add(Claim::On(n.clone(), base_n.clone()), Origin::Input);
+                            facts.add(Claim::OnSegment(n.clone(), base_n), Origin::Input);
                             let seg = format!("{}{}", point, n);
                             facts.add(
                                 Claim::pred(
@@ -584,7 +590,9 @@ fn process_construction(
                     Geom::PerpendicularLine { point, base, .. } => {
                         // The point lies on the base, and the perpendicular
                         // through `point` to the base is perpendicular to it.
-                        facts.add(Claim::On(n.clone(), Claim::norm_seg(base)), Origin::Input);
+                        let base_n = Claim::norm_seg(base);
+                        facts.add(Claim::On(n.clone(), base_n.clone()), Origin::Input);
+                        facts.add(Claim::OnSegment(n.clone(), base_n), Origin::Input);
                         let seg = format!("{}{}", point, n);
                         facts.add(
                             Claim::pred(
@@ -635,7 +643,9 @@ fn process_construction(
                 Claim::pred("IsMedian", &[n.clone(), seg.clone()], Value::Bool(true)),
                 Origin::Input,
             );
-            facts.add(Claim::On(n.clone(), Claim::norm_seg(&seg)), Origin::Input);
+            let seg_n = Claim::norm_seg(&seg);
+            facts.add(Claim::On(n.clone(), seg_n.clone()), Origin::Input);
+            facts.add(Claim::OnSegment(n.clone(), seg_n), Origin::Input);
             facts.add(Claim::seg_eq(&format!("{}{}", n, a), &format!("{}{}", n, b)), Origin::Input);
             let _ = mpos;
         }
@@ -654,7 +664,9 @@ fn process_construction(
                 Claim::pred("IsAngleBisector", &[seg.clone(), angle], Value::Bool(true)),
                 Origin::Input,
             );
-            facts.add(Claim::On(n.clone(), Claim::norm_seg(base)), Origin::Input);
+            let base_n = Claim::norm_seg(base);
+            facts.add(Claim::On(n.clone(), base_n.clone()), Origin::Input);
+            facts.add(Claim::OnSegment(n.clone(), base_n), Origin::Input);
             let _ = bpos;
         }
         Geom::Altitude { vertex, base, pos: apos } => {
@@ -679,7 +691,9 @@ fn process_construction(
                 Claim::pred("IsPerpendicular", &[seg.clone(), base.clone()], Value::Bool(true)),
                 Origin::Input,
             );
-            facts.add(Claim::On(n.clone(), Claim::norm_seg(&base)), Origin::Input);
+            let base_n = Claim::norm_seg(&base);
+            facts.add(Claim::On(n.clone(), base_n.clone()), Origin::Input);
+            facts.add(Claim::OnSegment(n.clone(), base_n), Origin::Input);
             let _ = apos;
         }
         Geom::Center { kind, tri, pos: cpos } => {
@@ -700,6 +714,7 @@ fn process_construction(
             // `D = PointOn(AB)`: the point lies on the segment/line.
             let seg_n = Claim::norm_seg(seg);
             facts.add(Claim::On(n.clone(), seg_n.clone()), Origin::Input);
+            facts.add(Claim::OnSegment(n.clone(), seg_n.clone()), Origin::Input);
             // `M = PointOn(Line(H,E))`: both endpoints lie on the line too.
             if let Some((a, b)) = line_pts {
                 facts.add(Claim::On(Claim::norm_ref(a), seg_n.clone()), Origin::Input);
