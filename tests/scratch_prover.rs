@@ -1,50 +1,32 @@
 use geo_lang::{checker, parser, prover, rules};
 use std::time::Instant;
 
-fn reordered(rules: &[rules::Rule]) -> Vec<rules::Rule> {
-    let ids = [
-        "parallel-transitivity",
-        "perp-with-parallel",
-        "trapezoid-midline",
-        "midsegment-parallel",
-        "midpoint-collinear",
-        "midsegment-half-length",
-        "midsegment-midpoint-on-median",
-        "altitude-is-perpendicular",
-    ];
-    let mut out: Vec<rules::Rule> = Vec::new();
-    for id in ids {
-        if let Some(r) = rules.iter().find(|r| r.id == id) {
-            out.push(r.clone());
-        }
-    }
-    for r in rules.iter().filter(|r| !ids.contains(&r.id)) {
-        out.push(r.clone());
-    }
-    out
-}
-
 #[test]
 fn scratch_stress() {
     let src = std::fs::read_to_string("stress_parallel_perp.geo").unwrap();
     let file = parser::parse("stress_parallel_perp.geo", &src).unwrap();
-    let rules = reordered(&rules::rule_base());
-    let mut sound = checker::build_facts_from_input(&file);
-    let _ = checker::apply_proofs(&file, &mut sound);
-    let _saturated = prover::forward_saturate(&sound, &rules);
+    let rules = rules::rule_base();
+    let mut facts = checker::build_facts_from_input(&file);
+    let _ = checker::apply_proofs(&file, &mut facts);
+    let mut saturated = prover::forward_saturate(&facts, &rules);
 
+    // Prove goals 1..28, feeding each result back into the saturated store
+    // (mirrors the CLI flow), then stress the cross-perpendicular goal 29.
     for goal in &file.goals {
-        if goal.index > 28 { break; }
+        if goal.index > 28 {
+            break;
+        }
         if let Some(claim) = &goal.claim {
             for g in checker::claim_atoms(claim) {
-                if !sound.contains(&g) {
-                    let _ = prover::prove(&g, &sound, &rules, 0);
+                if !saturated.contains(&g) {
+                    let _ = prover::prove_seeded(&g, &facts, &saturated, &rules);
                 }
-                sound.add(g.clone(), checker::Origin::Proof(goal.index, 0));
+                facts.add(g.clone(), checker::Origin::Proof(goal.index, 0));
+                saturated.add(g.clone(), checker::Origin::Proof(goal.index, 0));
             }
         }
     }
-    println!("facts after 28 goals: {}", sound.all().len());
+    println!("facts after 28 goals: {}", saturated.all().len());
 
     let goal = geo_lang::claim::Claim::pred(
         "IsPerpendicular",
@@ -52,6 +34,12 @@ fn scratch_stress() {
         geo_lang::claim::Value::Bool(true),
     );
     let t = Instant::now();
-    let r = prover::prove(&goal, &sound, &rules, 0);
-    println!("goal29 (reordered) => {} in {:?}, rule={:?}", if r.is_some() {"OK"} else {"FAIL"}, t.elapsed(), r.as_ref().map(|p| p.rule));
+    let r = prover::prove_seeded(&goal, &facts, &saturated, &rules);
+    println!(
+        "goal29 => {} in {:?}, rule={:?}",
+        if r.is_some() { "OK" } else { "FAIL" },
+        t.elapsed(),
+        r.as_ref().map(|p| p.rule)
+    );
+    assert!(r.is_some(), "goal29 should be provable");
 }

@@ -41,45 +41,6 @@ fn is_degenerate(c: &Claim) -> bool {
     }
 }
 
-/// All consequents `rule` can produce when every antecedent already matches a
-/// fact (bounded, forward chaining).
-fn forward_rule_consequents(rule: &Rule, facts: &[Claim]) -> Vec<Claim> {
-    let mut cur = vec![Bindings::new()];
-    for ant in &rule.antecedents {
-        let mut next = Vec::new();
-        'outer: for bind in &cur {
-            for f in facts {
-                next.extend(match_pat(f, ant, bind));
-                if next.len() > MAX_BINDINGS {
-                    break 'outer;
-                }
-            }
-        }
-        cur = next;
-        if cur.is_empty() {
-            break;
-        }
-    }
-    let mut out = Vec::new();
-    for bind in cur {
-        let mut ok = true;
-        for req in &rule.requires {
-            if !facts.contains(&instantiate(req, &bind)) {
-                ok = false;
-                break;
-            }
-        }
-        if !ok {
-            continue;
-        }
-        let c = instantiate(&rule.consequent, &bind);
-        if !c.has_unbound() && !facts.contains(&c) && !is_degenerate(&c) {
-            out.push(c);
-        }
-    }
-    out
-}
-
 /// Derive the closure of `facts` under `rules` (sound forward chaining), used
 /// to seed the backward prover with facts that follow directly from the input.
 pub fn forward_saturate(facts: &FactStore, rules: &[Rule]) -> FactStore {

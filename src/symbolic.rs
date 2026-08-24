@@ -748,24 +748,8 @@ impl Rational {
         Self::new(self.num * other.den + other.num * self.den, self.den * other.den)
     }
 
-    fn sub(self, other: Self) -> Self {
-        Self::new(self.num * other.den - other.num * self.den, self.den * other.den)
-    }
-
-    fn mul(self, other: Self) -> Self {
-        Self::new(self.num * other.num, self.den * other.den)
-    }
-
-    fn div(self, other: Self) -> Self {
-        Self::new(self.num * other.den, self.den * other.num)
-    }
-
     fn half(self) -> Self {
         Self::new(self.num, self.den * 2)
-    }
-
-    fn to_ratio_atom(self) -> (i64, i64) {
-        (self.num, self.den)
     }
 }
 
@@ -812,19 +796,6 @@ impl LineCoords {
         let cm = ca.add(cb).half();
         self.set_coord(line, mid, cm);
         Some(())
-    }
-
-    /// Compute ratio AD/DB for points on a line.
-    fn ratio(&self, line: &str, a: &str, d: &str, b: &str) -> Option<(i64, i64)> {
-        let ca = self.get_coord(line, a)?;
-        let cd = self.get_coord(line, d)?;
-        let cb = self.get_coord(line, b)?;
-        let ad = cd.sub(ca);
-        let db = cb.sub(cd);
-        if db.num == 0 {
-            return None;
-        }
-        Some(ad.div(db).to_ratio_atom())
     }
 }
 
@@ -914,23 +885,6 @@ pub fn derive_ratios_from_midpoints(facts: &FactStore, coords: &mut LineCoords) 
         }
         iteration += 1;
     }
-}
-
-/// Try to derive a ratio equality from coordinate arithmetic.
-fn try_derive_ratio(facts: &FactStore, goal: &Claim) -> Option<Claim> {
-    if let Claim::RatioEq(l, r) = goal {
-        // Try to derive both sides
-        let mut coords = LineCoords::default();
-        derive_ratios_from_midpoints(facts, &mut coords);
-        let l_val = eval_ratio(&l, &coords);
-        let r_val = eval_ratio(&r, &coords);
-        if let (Some(lv), Some(rv)) = (l_val, r_val) {
-            if lv == rv {
-                return Some(goal.clone());
-            }
-        }
-    }
-    None
 }
 
 /// Try to resolve a ratio using coordinate arithmetic from midpoint facts.
