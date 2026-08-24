@@ -8,7 +8,7 @@
 use crate::checker::{FactStore, Origin};
 use crate::claim::Claim;
 use crate::rules::{instantiate, match_pat, Bindings, Rule};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const MAX_DEPTH: usize = 12;
 
@@ -63,6 +63,10 @@ pub fn forward_saturate(facts: &FactStore, rules: &[Rule]) -> FactStore {
         changed = false;
         let current = store.all();
         for rule in rules {
+            // Skip inverse rules (ratio -> parallel) to avoid cycles in forward saturation
+            if rule.id.contains("invthales") {
+                continue;
+            }
             for c in forward_rule_consequents(rule, &current) {
                 if store.add(c, Origin::Proof(0, 0)) {
                     changed = true;
@@ -107,15 +111,30 @@ fn prove_inner(
     rules: &[Rule],
     depth: usize,
 ) -> Option<Proof> {
+    prove_inner_with_visited(goal, facts, rules, depth, &mut HashSet::new())
+}
+
+fn prove_inner_with_visited(
+    goal: &Claim,
+    facts: &FactStore,
+    rules: &[Rule],
+    depth: usize,
+    visited: &mut HashSet<Claim>,
+) -> Option<Proof> {
     if depth > MAX_DEPTH {
         return None;
     }
     if facts.contains(goal) {
         return Some(Proof::leaf(goal.clone()));
     }
+    if visited.contains(goal) {
+        return None; // Cycle detected
+    }
+    visited.insert(goal.clone());
 
     // Numeric derivations (lengths, ratios, Pythagoras) come before rules.
     if let Some(p) = crate::symbolic::numeric_proof(goal, facts) {
+        visited.remove(goal);
         return Some(p);
     }
 
@@ -148,7 +167,7 @@ fn prove_inner(
                     ok = false;
                     break;
                 }
-                match prove(&inst, facts, rules, depth + 1) {
+                match prove_inner_with_visited(&inst, facts, rules, depth + 1, visited) {
                     Some(p) => {
                         // Re-bind variables the recursive proof introduced.
                         let new_binds = match_pat(&p.claim, ant, &cur_bind);
@@ -182,6 +201,7 @@ fn prove_inner(
                 }
             }
             if req_ok {
+                visited.remove(goal);
                 return Some(Proof {
                     claim: goal.clone(),
                     antecedents: sub,
@@ -190,6 +210,7 @@ fn prove_inner(
             }
         }
     }
+    visited.remove(goal);
     None
 }
 

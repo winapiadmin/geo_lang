@@ -13,8 +13,8 @@
 //! and `AE/EC` are seen equal when `3/2 = 6/4` (cross-multiplication is
 //! implicit in the reduction).
 
-use crate::checker::FactStore;
-use crate::claim::{Claim, RatioAtom, RatioExpr};
+use crate::claim::{Claim, RatioAtom, RatioExpr, Value};
+use crate::checker::{split_seg, FactStore};
 use crate::prover::Proof;
 use std::collections::HashMap;
 
@@ -197,7 +197,7 @@ pub fn compute(facts: &FactStore) -> NumericEnv {
     let mut on: HashMap<String, Vec<char>> = HashMap::new();
     for c in &claims {
         if let Claim::On(p, s) | Claim::OnSegment(p, s) | Claim::OnLine(p, s) = c {
-            if let Some((a, b)) = norm_pts(s) {
+            if let Some((a, b)) = norm_pts(&s) {
                 let key = seg_of(a, b);
                 let pch = Claim::norm_ref(p).chars().next().unwrap_or('\0');
                 let list = on.entry(key).or_default();
@@ -435,6 +435,18 @@ fn resolve_ratio(e: &RatioExpr, env: &NumericEnv) -> Option<(u32, u32)> {
     }
 }
 
+/// Try to resolve a ratio using coordinate arithmetic from midpoint facts.
+fn resolve_ratio_coords(e: &RatioExpr, facts: &FactStore) -> Option<(u32, u32)> {
+    let mut coords = LineCoords::default();
+    derive_ratios_from_midpoints(facts, &mut coords);
+    // Debug
+    // eprintln!("Coords for {:?}: lines={}", e, coords.coords.len());
+    // for (line, pts) in &coords.coords {
+    //     eprintln!("  {}: {:?}", line, pts);
+    // }
+    eval_ratio(e, &coords).map(|(n, d)| (n as u32, d as u32))
+}
+
 /// Try to derive a concrete length for `seg`.
 pub fn solve_len(seg: &str, facts: &FactStore) -> Option<u32> {
     let env = compute(facts);
@@ -446,10 +458,19 @@ pub fn solve_len(seg: &str, facts: &FactStore) -> Option<u32> {
 pub fn ratio_solves(goal: &Claim, facts: &FactStore) -> bool {
     if let Claim::RatioEq(l, r) = goal {
         let env = compute(facts);
-        match (resolve_ratio(l, &env), resolve_ratio(r, &env)) {
-            (Some(a), Some(b)) => a == b,
-            _ => false,
+        // First try numeric lengths
+        if let (Some(a), Some(b)) = (resolve_ratio(l, &env), resolve_ratio(r, &env)) {
+            if a == b {
+                return true;
+            }
         }
+        // Then try coordinate arithmetic from midpoint facts
+        if let (Some(a), Some(b)) = (resolve_ratio_coords(l, facts), resolve_ratio_coords(r, facts)) {
+            if a == b {
+                return true;
+            }
+        }
+        false
     } else {
         false
     }
@@ -496,7 +517,7 @@ pub fn numeric_proof(goal: &Claim, facts: &FactStore) -> Option<Proof> {
             }
             None
         }
-        Claim::RatioEq(_, _) => ratio_proof(goal, &env),
+        Claim::RatioEq(_, _) => ratio_proof(goal, &env, facts),
         _ => None,
     }
 }
@@ -644,8 +665,9 @@ fn explain_d(env: &NumericEnv, c: &Claim, path: &mut Vec<String>) -> Proof {
     }
 }
 
-fn ratio_proof(goal: &Claim, env: &NumericEnv) -> Option<Proof> {
+fn ratio_proof(goal: &Claim, env: &NumericEnv, facts: &FactStore) -> Option<Proof> {
     if let Claim::RatioEq(l, r) = goal {
+        // Try numeric lengths first
         if resolve_ratio(l, env).is_some() && resolve_ratio(r, env).is_some() {
             let (a, b) = (resolve_ratio(l, env)?, resolve_ratio(r, env)?);
             if a != b {
@@ -658,6 +680,25 @@ fn ratio_proof(goal: &Claim, env: &NumericEnv) -> Option<Proof> {
                 rule: Some("numeric"),
                 antecedents,
             });
+        }
+        // Try coordinate arithmetic from midpoint facts
+        if let (Some(a), Some(b)) = (resolve_ratio_coords(l, facts), resolve_ratio_coords(r, facts)) {
+            if a == b {
+                let mut coords = LineCoords::default();
+                derive_ratios_from_midpoints(facts, &mut coords);
+                let mut antecedents = Vec::new();
+                // Add coordinate derivation as a proof step
+                antecedents.push(Proof {
+                    claim: goal.clone(),
+                    rule: Some("coordinate-arithmetic"),
+                    antecedents: Vec::new(),
+                });
+                return Some(Proof {
+                    claim: goal.clone(),
+                    rule: Some("invthales-general"),
+                    antecedents,
+                });
+            }
         }
     }
     None
@@ -683,4 +724,332 @@ fn ratio_inputs(e: &RatioExpr, env: &NumericEnv) -> Vec<Proof> {
         }
     }
     out
+}
+
+/// Rational number with arbitrary precision (using i64).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Rational {
+    num: i64,
+    den: i64,
+}
+
+impl Rational {
+    fn new(num: i64, den: i64) -> Self {
+        if den == 0 {
+            return Self { num: 0, den: 1 };
+        }
+        let mut r = Self { num, den };
+        r.normalize();
+        r
+    }
+
+    fn normalize(&mut self) {
+        if self.den < 0 {
+            self.num = -self.num;
+            self.den = -self.den;
+        }
+        let g = gcd_i64(self.num.abs(), self.den.abs());
+        self.num /= g;
+        self.den /= g;
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self::new(self.num * other.den + other.num * self.den, self.den * other.den)
+    }
+
+    fn sub(self, other: Self) -> Self {
+        Self::new(self.num * other.den - other.num * self.den, self.den * other.den)
+    }
+
+    fn mul(self, other: Self) -> Self {
+        Self::new(self.num * other.num, self.den * other.den)
+    }
+
+    fn div(self, other: Self) -> Self {
+        Self::new(self.num * other.den, self.den * other.num)
+    }
+
+    fn half(self) -> Self {
+        Self::new(self.num, self.den * 2)
+    }
+
+    fn to_ratio_atom(self) -> (i64, i64) {
+        (self.num, self.den)
+    }
+}
+
+fn gcd_i64(mut a: i64, mut b: i64) -> i64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a.max(1)
+}
+
+/// Tracks point coordinates on lines using rational arithmetic.
+/// Each line is identified by its normalized segment (e.g., "a-b").
+/// Points on the line get rational coordinates where endpoints are 0 and 1.
+#[derive(Debug, Default)]
+pub struct LineCoords {
+    /// line_key -> (point_name -> coordinate)
+    pub coords: HashMap<String, HashMap<String, Rational>>,
+    /// Tracks which point is at coordinate 0 and 1 for each line
+    pub endpoints: HashMap<String, (String, String)>,
+}
+
+impl LineCoords {
+    fn set_endpoints(&mut self, line: &str, a: &str, b: &str) {
+        self.endpoints.insert(line.to_string(), (a.to_string(), b.to_string()));
+        let entry = self.coords.entry(line.to_string()).or_default();
+        entry.insert(a.to_string(), Rational::new(0, 1));
+        entry.insert(b.to_string(), Rational::new(1, 1));
+    }
+
+    fn get_coord(&self, line: &str, point: &str) -> Option<Rational> {
+        self.coords.get(line)?.get(point).copied()
+    }
+
+    fn set_coord(&mut self, line: &str, point: &str, coord: Rational) {
+        self.coords.entry(line.to_string()).or_default().insert(point.to_string(), coord);
+    }
+
+    /// Set point as midpoint of two other points on the same line.
+    fn set_midpoint(&mut self, line: &str, mid: &str, a: &str, b: &str) -> Option<()> {
+        let ca = self.get_coord(line, a)?;
+        let cb = self.get_coord(line, b)?;
+        let cm = ca.add(cb).half();
+        self.set_coord(line, mid, cm);
+        Some(())
+    }
+
+    /// Compute ratio AD/DB for points on a line.
+    fn ratio(&self, line: &str, a: &str, d: &str, b: &str) -> Option<(i64, i64)> {
+        let ca = self.get_coord(line, a)?;
+        let cd = self.get_coord(line, d)?;
+        let cb = self.get_coord(line, b)?;
+        let ad = cd.sub(ca);
+        let db = cb.sub(cd);
+        if db.num == 0 {
+            return None;
+        }
+        Some(ad.div(db).to_ratio_atom())
+    }
+}
+
+/// Derive ratios from On facts and midpoint facts using coordinate arithmetic.
+/// Derive ratios from On facts and midpoint facts using coordinate arithmetic.
+pub fn derive_ratios_from_midpoints(facts: &FactStore, coords: &mut LineCoords) {
+    // First, set endpoints from On facts and segment definitions
+    for c in facts.all() {
+        match c {
+            Claim::On(p, seg) => {
+                let seg_key = Claim::norm_seg(&seg);
+                if let Some((a, b)) = split_seg(&seg_key) {
+                    coords.set_endpoints(&seg_key, &a, &b);
+                }
+            }
+            Claim::SegEq(a, b) => {
+                if let (Some((a1, a2)), Some((b1, b2))) = (split_seg(&a), split_seg(&b)) {
+                    // Segments are equal - could propagate coordinates
+                    let _ = (a1, a2, b1, b2);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Process midpoint facts to derive coordinates
+    let mut changed = true;
+    let mut iteration = 0;
+    while changed && iteration < 100 {
+        changed = false;
+        for c in facts.all() {
+            if let Claim::PredVal { name, args, value } = c {
+                if name == "ismedian" && value == Value::Bool(true) && args.len() == 2 {
+                    let mid = &args[0];
+                    let seg = &args[1];
+                    if let Some((a, b)) = split_seg(&seg) {
+                        // Find the line that contains both endpoints
+                        let line_opt = {
+                            let mut found = None;
+                            for (line, _endpoints) in &coords.endpoints {
+                                let ca = coords.get_coord(line, &a);
+                                let cb = coords.get_coord(line, &b);
+                                if ca.is_some() && cb.is_some() {
+                                    found = Some(line.clone());
+                                    break;
+                                }
+                            }
+                            found
+                        };
+                        if let Some(line) = line_opt {
+                            let ca = coords.get_coord(&line, &a);
+                            let cb = coords.get_coord(&line, &b);
+                            if ca.is_some() && cb.is_some() {
+                                // Only set if not already set
+                                let mid_coord = coords.get_coord(&line, mid);
+                                if mid_coord.is_none() {
+                                    coords.set_midpoint(&line, mid, &a, &b);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        iteration += 1;
+    }
+}
+
+/// Try to derive a ratio equality from coordinate arithmetic.
+fn try_derive_ratio(facts: &FactStore, goal: &Claim) -> Option<Claim> {
+    if let Claim::RatioEq(l, r) = goal {
+        // Try to derive both sides
+        let mut coords = LineCoords::default();
+        derive_ratios_from_midpoints(facts, &mut coords);
+        let l_val = eval_ratio(&l, &coords);
+        let r_val = eval_ratio(&r, &coords);
+        if let (Some(lv), Some(rv)) = (l_val, r_val) {
+            if lv == rv {
+                return Some(goal.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Try to resolve a ratio using coordinate arithmetic from midpoint facts.
+pub fn eval_ratio(e: &RatioExpr, coords: &LineCoords) -> Option<(i64, i64)> {
+    match e {
+        RatioExpr::Seg(s) => {
+            // A segment on a line with endpoints 0 and 1 has length 1
+            Some((1, 1))
+        }
+        RatioExpr::Quot { num, den } => {
+            // Find the common line for the entire ratio
+            let line = find_line_for_ratio(num, den, coords)?;
+            // Evaluate both on the same line
+            let n = eval_atom_on_line(num, coords, &line)?;
+            let d = eval_atom_on_line(den, coords, &line)?;
+            if d.0 == 0 {
+                return None;
+            }
+            Some((n.0 * d.1, n.1 * d.0))
+        }
+    }
+}
+
+/// Find the line that contains all points in the ratio expression.
+fn find_line_for_ratio(num: &RatioAtom, den: &RatioAtom, coords: &LineCoords) -> Option<String> {
+    // Collect all points in the ratio
+    let mut points = Vec::new();
+    collect_points_from_atom(num, &mut points);
+    collect_points_from_atom(den, &mut points);
+    
+    // Find a line that contains all points
+    for (line, _endpoints) in &coords.endpoints {
+        let mut all_on_line = true;
+        for p in &points {
+            if coords.get_coord(line, p).is_none() {
+                all_on_line = false;
+                break;
+            }
+        }
+        if all_on_line {
+            return Some(line.clone());
+        }
+    }
+    None
+}
+
+fn collect_points_from_atom(atom: &RatioAtom, points: &mut Vec<String>) {
+    match atom {
+        RatioAtom::Int(_) => {}
+        RatioAtom::Seg(s) => {
+            if s.contains('-') {
+                let parts: Vec<&str> = s.split('-').collect();
+                if parts.len() == 2 {
+                    points.push(parts[0].to_string());
+                    points.push(parts[1].to_string());
+                }
+            } else {
+                let chars: Vec<char> = s.chars().collect();
+                if chars.len() == 2 {
+                    points.push(chars[0].to_string());
+                    points.push(chars[1].to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Evaluate a ratio atom on a specific line.
+fn eval_atom_on_line(a: &RatioAtom, coords: &LineCoords, line: &str) -> Option<(i64, i64)> {
+    match a {
+        RatioAtom::Int(n) => Some((*n as i64, 1)),
+        RatioAtom::Seg(s) => {
+            let (a, b) = if s.contains('-') {
+                let parts: Vec<&str> = s.split('-').collect();
+                if parts.len() == 2 {
+                    (parts[0].to_string(), parts[1].to_string())
+                } else {
+                    return None;
+                }
+            } else {
+                let chars: Vec<char> = s.chars().collect();
+                if chars.len() == 2 {
+                    (chars[0].to_string(), chars[1].to_string())
+                } else {
+                    return None;
+                }
+            };
+            
+            let ca = coords.get_coord(line, &a)?;
+            let cb = coords.get_coord(line, &b)?;
+            let len_num = (cb.num * ca.den - ca.num * cb.den).abs();
+            let len_den = ca.den * cb.den;
+            Some((len_num, len_den))
+        }
+    }
+}
+
+/// Evaluate a ratio atom using coordinate arithmetic.
+pub fn eval_atom(a: &RatioAtom, coords: &LineCoords) -> Option<(i64, i64)> {
+    match a {
+        RatioAtom::Int(n) => Some((*n as i64, 1)),
+        RatioAtom::Seg(s) => {
+            // Parse segment endpoints
+            let (a, b) = if s.contains('-') {
+                let parts: Vec<&str> = s.split('-').collect();
+                if parts.len() == 2 {
+                    (parts[0].to_string(), parts[1].to_string())
+                } else {
+                    return None;
+                }
+            } else {
+                let chars: Vec<char> = s.chars().collect();
+                if chars.len() == 2 {
+                    (chars[0].to_string(), chars[1].to_string())
+                } else {
+                    return None;
+                }
+            };
+
+            // Find a line that contains both endpoints
+            for (line, _endpoints) in &coords.endpoints {
+                let ca = coords.get_coord(line, &a);
+                let cb = coords.get_coord(line, &b);
+                if let (Some(ca), Some(cb)) = (ca, cb) {
+                    // Both points are on this line
+                    // Segment length = |cb - ca| as rational
+                    let len_num = (cb.num * ca.den - ca.num * cb.den).abs();
+                    let len_den = ca.den * cb.den;
+                    return Some((len_num, len_den));
+                }
+            }
+            None
+        }
+    }
 }

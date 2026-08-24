@@ -1190,6 +1190,34 @@ pub fn rule_base() -> Vec<Rule> {
                 Value::Bool(true),
             ),
         },
+        // Variant of converse Thales: if a line intersects AB at E and AC at L
+        // with AE/EB = AL/LC, then the line is parallel to BC.
+        Rule {
+            id: "invthales-variant",
+            antecedents: vec![
+                PClaim::On(PExpr::PtVar("E".into()), PExpr::Seg2("A".into(), "B".into())),
+                PClaim::On(PExpr::PtVar("L".into()), PExpr::Seg2("A".into(), "C".into())),
+                PClaim::RatioEq(
+                    PRatioExpr::Quot {
+                        num: PRatioAtom::Expr(PExpr::Seg2("A".into(), "E".into())),
+                        den: PRatioAtom::Expr(PExpr::Seg2("E".into(), "B".into())),
+                    },
+                    PRatioExpr::Quot {
+                        num: PRatioAtom::Expr(PExpr::Seg2("A".into(), "L".into())),
+                        den: PRatioAtom::Expr(PExpr::Seg2("L".into(), "C".into())),
+                    },
+                ),
+            ],
+            requires: vec![],
+            consequent: PClaim::PredVal(
+                "isparallel".into(),
+                vec![
+                    PExpr::Seg2("E".into(), "L".into()),
+                    PExpr::Seg2("B".into(), "C".into()),
+                ],
+                Value::Bool(true),
+            ),
+        },
         // In an isosceles triangle the two legs are equal.
         Rule {
             id: "isosceles-legs-equal",

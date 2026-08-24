@@ -230,7 +230,7 @@ fn transitive_on_closure(facts: &mut FactStore) {
 
 /// Split a segment reference into its two endpoints.
 /// Returns (Y, Z) for segments like "ab" or "a-b".
-fn split_seg(seg: &str) -> Option<(String, String)> {
+pub fn split_seg(seg: &str) -> Option<(String, String)> {
     let s = seg.to_lowercase();
     if s.contains('-') {
         let parts: Vec<&str> = s.split('-').collect();
