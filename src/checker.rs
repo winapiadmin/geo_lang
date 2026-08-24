@@ -191,7 +191,57 @@ pub fn build_facts_from_input(file: &File) -> FactStore {
     for stmt in &file.input {
         process_input(stmt, &mut facts, &mut diags, &known);
     }
+    // Transitive closure for On facts: if X on YZ and Z on AB, then X on AB
+    transitive_on_closure(&mut facts);
     facts
+}
+
+/// Compute transitive closure of On facts for midpoint chains only.
+/// If X is on segment YZ, and Z is the midpoint of YW, then X is on YW.
+fn transitive_on_closure(facts: &mut FactStore) {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let current: Vec<_> = facts.all().into_iter().filter(|c| matches!(c, Claim::On(_, _))).collect();
+        for c1 in &current {
+            if let Claim::On(x, yz) = c1 {
+                // Check if yz is a segment Y-Z where Z is a midpoint of YW
+                if let Some((y, z)) = split_seg(yz) {
+                    // Check if Z is midpoint of Y-W for some W
+                    for c2 in &current {
+                        if let Claim::On(z2, yw) = c2 {
+                            if *z2 == z {
+                                // Check if Z is midpoint of YW
+                                let median_fact = Claim::pred("IsMedian", &[z.clone(), yw.clone()], Value::Bool(true));
+                                if facts.contains(&median_fact) {
+                                    // X on YZ and Z is midpoint of YW => X on YW
+                                    if facts.add(Claim::On(x.clone(), yw.clone()), Origin::Input) {
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Split a segment reference into its two endpoints.
+/// Returns (Y, Z) for segments like "ab" or "a-b".
+fn split_seg(seg: &str) -> Option<(String, String)> {
+    let s = seg.to_lowercase();
+    if s.contains('-') {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() == 2 {
+            return Some((parts[0].to_string(), parts[1].to_string()));
+        }
+    } else if s.len() == 2 {
+        let chars: Vec<char> = s.chars().collect();
+        return Some((chars[0].to_string(), chars[1].to_string()));
+    }
+    None
 }
 
 /// Apply every proof block to `facts`, respecting `proofProperties`.
