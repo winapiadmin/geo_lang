@@ -181,8 +181,13 @@ pub fn match_pat(claim: &Claim, pat: &PClaim, bind: &Bindings) -> Vec<Bindings> 
     match (claim, pat) {
         (Claim::SegEq(a, b), PClaim::SegEq(pa, pb)) => {
             let mut out = Vec::new();
+            // Claims are pair-canonical and patterns may be written in either
+            // order, so try all four pairings.
             for b1 in match_expr(a, pa, bind) {
                 out.extend(match_expr(b, pb, &b1));
+            }
+            for b1 in match_expr(a, pb, bind) {
+                out.extend(match_expr(b, pa, &b1));
             }
             out
         }
@@ -385,17 +390,17 @@ pub fn instantiate(pat: &PClaim, bind: &Bindings) -> Claim {
         PClaim::SegEq(a, b) => {
             let s1 = render_expr(a, bind);
             let s2 = render_expr(b, bind);
-            Claim::SegEq(Claim::norm_seg(&s1), Claim::norm_seg(&s2))
+            Claim::seg_eq(&s1, &s2)
         }
         PClaim::TriEq(a, b) => {
             let s1 = render_expr(a, bind);
             let s2 = render_expr(b, bind);
-            Claim::TriEq(Claim::norm_tri(&s1), Claim::norm_tri(&s2))
+            Claim::tri_eq(&s1, &s2)
         }
         PClaim::AngleEq(a, b) => {
             let s1 = render_expr(a, bind);
             let s2 = render_expr(b, bind);
-            Claim::AngleEq(Claim::norm_angle(&s1), Claim::norm_angle(&s2))
+            Claim::angle_eq(&s1, &s2)
         }
         PClaim::RatioEq(l, r) => {
             let lhs = render_pratio(l, bind);
@@ -1548,5 +1553,6 @@ pub fn rule_base() -> Vec<Rule> {
         },
     ]
 }
+
 
 

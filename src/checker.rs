@@ -193,7 +193,64 @@ pub fn build_facts_from_input(file: &File) -> FactStore {
     }
     // Transitive closure for On facts: if X on YZ and Z on AB, then X on AB
     transitive_on_closure(&mut facts);
+    // Thales: the midpoint of the hypotenuse of a right triangle is
+    // equidistant from all three vertices.
+    derive_right_triangle_circumcenter(&mut facts);
     facts
+}
+
+/// For every right triangle `T` with `rightAt = V` and every midpoint `W` of
+/// the side opposite `V`, add `WV' = WV''` for the two legs — i.e. record
+/// that `W` is equidistant from all three vertices.
+fn derive_right_triangle_circumcenter(facts: &mut FactStore) {
+    use crate::claim::Value;
+    // Collect right-triangle centers first to avoid borrowing conflicts.
+    let mut rights: Vec<(String, char)> = Vec::new(); // (tri, apex)
+    for c in facts.all() {
+        if let Claim::PredVal { name, args, value } = c {
+            if name == "rightat" && args.len() == 1 {
+                if let Value::Point(p) = value {
+                    let mut chars = p.chars();
+                    if let (Some(ch), None) = (chars.next(), chars.next()) {
+                        rights.push((args[0].clone(), ch));
+                    }
+                }
+            }
+        }
+    }
+    let medians: Vec<_> = facts
+        .all()
+        .into_iter()
+        .filter_map(|c| match c {
+            Claim::PredVal { name, args, value }
+                if name == "ismedian" && value == Value::Bool(true) && args.len() == 2 =>
+            {
+                Some((args[0].clone(), args[1].clone()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    for (tri, apex) in rights {
+        let tri_chars: Vec<char> = tri.chars().collect();
+        if tri_chars.len() != 3 || !tri_chars.contains(&apex) {
+            continue;
+        }
+        let others: Vec<char> = tri_chars.iter().copied().filter(|&c| c != apex).collect();
+        if others.len() != 2 {
+            continue;
+        }
+        let hyp = Claim::seg_key(&others[0].to_string(), &others[1].to_string());
+        for (mid, seg) in &medians {
+            if *seg == hyp {
+                let a = Claim::seg_key(mid, &apex.to_string());
+                let b = Claim::seg_key(mid, &others[0].to_string());
+                let c2 = Claim::seg_key(mid, &others[1].to_string());
+                facts.add(Claim::seg_eq(&a, &b), Origin::Input);
+                facts.add(Claim::seg_eq(&a, &c2), Origin::Input);
+            }
+        }
+    }
 }
 
 /// Compute transitive closure of On facts for midpoint chains only.

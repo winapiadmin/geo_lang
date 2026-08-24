@@ -244,14 +244,12 @@ pub fn prove(
     depth: usize,
 ) -> Option<Proof> {
     let _ = depth;
-    if facts.contains(goal) {
-        return Some(Proof::leaf(goal.clone()));
-    }
 
     // Numeric derivations (lengths, ratios, coordinates, Pythagoras) come first.
     if let Some(p) = crate::symbolic::numeric_proof(goal, facts) {
         return Some(p);
     }
+
 
     let saturated = saturate_toward(facts, rules, Some(goal));
     prove_inner(goal, &saturated, rules, facts)

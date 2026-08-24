@@ -183,8 +183,17 @@ impl Claim {
     }
 
     /// Build a segment-equality claim from raw refs.
+    /// Build a segment-equality claim from raw refs. The two sides are
+    /// stored in canonical (sorted) order so `WX=WY` and `WY=WX` denote the
+    /// identical claim.
     pub fn seg_eq(lhs: &str, rhs: &str) -> Claim {
-        Claim::SegEq(Self::norm_seg(lhs), Self::norm_seg(rhs))
+        let a = Self::norm_seg(lhs);
+        let b = Self::norm_seg(rhs);
+        if b < a {
+            Claim::SegEq(b, a)
+        } else {
+            Claim::SegEq(a, b)
+        }
     }
 
     /// Build a predicate claim from a raw predicate name and args.
@@ -313,8 +322,16 @@ impl Claim {
     /// Build a triangle-equality claim. Each triangle's vertices are
     /// lower-cased and sorted, so any permutation of either triangle denotes
     /// the same equality (`ABC=MNP` == `ACB=MPN` == ...).
+    /// Build a triangle-equality claim. Vertices are normalized per side and
+    /// the two sides stored in canonical (sorted) order.
     pub fn tri_eq(lhs: &str, rhs: &str) -> Claim {
-        Claim::TriEq(Self::norm_tri(lhs), Self::norm_tri(rhs))
+        let a = Self::norm_tri(lhs);
+        let b = Self::norm_tri(rhs);
+        if b < a {
+            Claim::TriEq(b, a)
+        } else {
+            Claim::TriEq(a, b)
+        }
     }
 
     /// Normalize a triangle reference: lower-case and sort its vertices so
@@ -342,8 +359,16 @@ impl Claim {
     }
 
     /// Build an angle-equality claim from raw angle refs such as `ABC`.
+    /// Build an angle-equality claim. Angles are normalized per side and the
+    /// two sides stored in canonical (sorted) order.
     pub fn angle_eq(lhs: &str, rhs: &str) -> Claim {
-        Claim::AngleEq(Self::norm_angle(lhs), Self::norm_angle(rhs))
+        let a = Self::norm_angle(lhs);
+        let b = Self::norm_angle(rhs);
+        if b < a {
+            Claim::AngleEq(b, a)
+        } else {
+            Claim::AngleEq(a, b)
+        }
     }
 
     /// Build a ratio-equality claim. Both sides are canonicalized so that

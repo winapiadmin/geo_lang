@@ -29,10 +29,10 @@ fn checker_reports_wrong_result_with_hint() {
 
     let wrong = diags
         .iter()
-        .find(|d| d.message.starts_with("Wrong result: IsMedian(D,BC) -> BD=BC"))
+        .find(|d| d.message.starts_with("Wrong result: IsMedian(D,BC) -> BC=BD"))
         .expect("wrong result error");
     assert!(wrong.is_error());
-    assert_eq!(wrong.hint.as_deref(), Some("modify BD=BC to BD=DC"));
+    assert_eq!(wrong.hint.as_deref(), Some("modify BC=BD to BD=CD"));
 }
 
 #[test]
