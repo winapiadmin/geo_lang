@@ -202,7 +202,13 @@ impl Claim {
             }
             "ismedian" | "isperpendicular" | "isparallel" | "isperpendicularbisector" => {
                 if args.len() == 2 {
-                    vec![Self::norm_seg(&args[0]), Self::norm_seg(&args[1])]
+                    // First arg is a point (or segment for isperpendicular), second is a segment.
+                    // Use norm_ref for point, norm_seg for segment.
+                    if name == "ismedian" || name == "isperpendicular" {
+                        vec![Self::norm_ref(&args[0]), Self::norm_seg(&args[1])]
+                    } else {
+                        vec![Self::norm_seg(&args[0]), Self::norm_seg(&args[1])]
+                    }
                 } else {
                     args.iter().map(|a| Self::norm_ref(a)).collect()
                 }

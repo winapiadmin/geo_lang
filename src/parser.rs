@@ -794,7 +794,17 @@ impl Parser {
                     expect_symbol(toks, k, ')')?;
                     args.push(inner);
                 } else {
-                    args.push(a);
+                    // Split multi-char segment refs like `P1-P2` into two args.
+                    if a.contains('-') {
+                        let parts: Vec<&str> = a.split('-').collect();
+                        for p in parts {
+                            if !p.is_empty() {
+                                args.push(p.to_string());
+                            }
+                        }
+                    } else {
+                        args.push(a);
+                    }
                 }
                 if *k < toks.len() && is_symbol(&toks[*k], ',') {
                     *k += 1;

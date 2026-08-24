@@ -93,27 +93,32 @@ fn try_bind(var: &str, val: &str, bind: &Bindings) -> Vec<Bindings> {
 pub fn match_expr(refval: &str, e: &PExpr, bind: &Bindings) -> Vec<Bindings> {
     match e {
         PExpr::PtVar(v) => {
-            if refval.len() == 1 {
-                try_bind(v, refval, bind)
-            } else {
-                vec![]
-            }
+            // Match any point name (single or multi-char).
+            // The reference value is already normalized (lowercase).
+            try_bind(v, refval, bind)
         }
         PExpr::Seg2(v1, v2) => {
-            if refval.len() == 2 {
-                let a = refval[0..1].to_string();
-                let b = refval[1..2].to_string();
-                let mut out = Vec::new();
-                if let Some(fb) = try_bind(v1, &a, bind).into_iter().next() {
-                    out.extend(try_bind(v2, &b, &fb));
+            // Handle both legacy 2-char segments ("ab") and multi-char with delimiter ("p1-p2")
+            let (a, b) = if refval.contains('-') {
+                let parts: Vec<&str> = refval.split('-').collect();
+                if parts.len() == 2 {
+                    (parts[0].to_string(), parts[1].to_string())
+                } else {
+                    return vec![];
                 }
-                if let Some(fb) = try_bind(v1, &b, bind).into_iter().next() {
-                    out.extend(try_bind(v2, &a, &fb));
-                }
-                out
+            } else if refval.len() == 2 {
+                (refval[0..1].to_string(), refval[1..2].to_string())
             } else {
-                vec![]
+                return vec![];
+            };
+            let mut out = Vec::new();
+            if let Some(fb) = try_bind(v1, &a, bind).into_iter().next() {
+                out.extend(try_bind(v2, &b, &fb));
             }
+            if let Some(fb) = try_bind(v1, &b, bind).into_iter().next() {
+                out.extend(try_bind(v2, &a, &fb));
+            }
+            out
         }
         PExpr::Tri3(v1, v2, v3) => {
             if refval.len() == 3 {
@@ -315,7 +320,12 @@ pub fn render_expr(e: &PExpr, bind: &Bindings) -> String {
         PExpr::Seg2(a, b) => {
             let x = bind.get(a).cloned().unwrap_or_default();
             let y = bind.get(b).cloned().unwrap_or_default();
-            format!("{}{}", x, y)
+            // Use - delimiter for multi-char points
+            if x.len() > 1 || y.len() > 1 {
+                format!("{}-{}", x, y)
+            } else {
+                format!("{}{}", x, y)
+            }
         }
         PExpr::Tri3(a, b, c) => {
             let x = bind.get(a).cloned().unwrap_or_default();

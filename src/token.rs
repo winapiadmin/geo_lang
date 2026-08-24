@@ -170,11 +170,14 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, LexError> {
             continue;
         }
 
-        // Identifiers: start with a letter, continue with letters/digits/_.
+        // Identifiers: start with a letter, continue with letters/digits/_ or hyphen.
+        // Hyphen allowed for multi-char point segments like `P1-P2`.
         if c.is_ascii_alphabetic() {
             let start_col = col;
             let mut s = String::new();
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == '_') {
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == '_' || bytes[i] == '-')
+            {
                 s.push(bytes[i]);
                 i += 1;
                 col += 1;

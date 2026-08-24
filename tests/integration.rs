@@ -1445,9 +1445,27 @@ prove:
         "expected circle rule in tree, got:\n{}", tree);
 }
 
-// Multi-char point names in claims require explicit delimiter (P1-P2)
-// which is not yet supported in predicate arguments. Distance(P1,P2)
-// works in EqChain but not as predicate arg. Skipping for now.
+#[test]
+fn multi_char_points_in_claims() {
+    let src = r#"
+inp:
+Triangle(A,B,C)
+P1=Midpoint(AB)
+P2=Midpoint(AC)
+prove:
+1. IsParallel(P1-P2,BC)=true
+"#;
+    let file = parser::parse("test.geo", src).unwrap();
+    let facts = checker::build_facts_from_input(&file);
+    let rules = rules::rule_base();
+
+    // Multi-char points work via `-` delimiter in predicate args
+    let goal = geo_lang::claim::Claim::pred("IsParallel", &["P1-P2".into(), "BC".into()], Value::Bool(true));
+    let proof = prover::prove(&goal, &facts, &rules, 0).expect("should prove");
+    // Check the proof tree has the expected rule
+    let tree = prover::render_tree(&proof, 0, None);
+    assert!(tree.contains("midsegment-parallel"), "expected midsegment rule in tree, got:\n{}", tree);
+}
 
 #[test]
 fn indexed_points_in_constructions() {
