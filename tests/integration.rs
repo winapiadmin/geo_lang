@@ -1,6 +1,7 @@
 //! Integration tests for the proof checker and prover.
 
 use geo_lang::{checker, parser, prover, rules};
+use geo_lang::claim::Value;
 
 fn check_source(src: &str) -> Vec<geo_lang::diag::Diagnostic> {
     let file = parser::parse("test.geo", src).expect("parse");
@@ -1399,4 +1400,73 @@ prove:
         facts.contains(&on_he("e")),
         "E should lie on line HE"
     );
+}
+
+#[test]
+fn on_same_circle_from_circumcenter() {
+    let src = r#"
+inp:
+Triangle(A,B,C,[acute=true])
+O=Circumcenter(ABC)
+prove:
+1. OnSameCircle(A,B,C)=true
+"#;
+    let file = parser::parse("test.geo", src).unwrap();
+    let facts = checker::build_facts_from_input(&file);
+    let rules = rules::rule_base();
+
+    let goal = geo_lang::claim::Claim::pred("OnSameCircle", &["A".into(), "B".into(), "C".into()], Value::Bool(true));
+    let proof = prover::prove(&goal, &facts, &rules, 0).expect("should prove");
+    let chain = prover::render_chain(&proof, None);
+    assert!(chain.contains("IsCircumcenter(O,ABC)"), "expected circumcenter rule, got: {}", chain);
+}
+
+#[test]
+fn on_same_circle_from_equidistant() {
+    let src = r#"
+inp:
+Triangle(A,B,C,[isoscelesAt=A])
+O=Circumcenter(ABC)
+prove:
+1. OA=OB
+2. OA=OC
+3. OnSameCircle(A,B,C)=true
+"#;
+    let file = parser::parse("test.geo", src).unwrap();
+    let facts = checker::build_facts_from_input(&file);
+    let rules = rules::rule_base();
+
+    // Goal 3 should be provable via circumcenter or equidistant
+    let goal = geo_lang::claim::Claim::pred("OnSameCircle", &["A".into(), "B".into(), "C".into()], Value::Bool(true));
+    let proof = prover::prove(&goal, &facts, &rules, 0).expect("should prove");
+    // Check the proof tree has the expected rule
+    let tree = prover::render_tree(&proof, 0, None);
+    assert!(tree.contains("circumcenter-equidistant-circle") || tree.contains("same-circle-from-equidistant"),
+        "expected circle rule in tree, got:\n{}", tree);
+}
+
+// Multi-char point names in claims require explicit delimiter (P1-P2)
+// which is not yet supported in predicate arguments. Distance(P1,P2)
+// works in EqChain but not as predicate arg. Skipping for now.
+
+#[test]
+fn indexed_points_in_constructions() {
+    let src = r#"
+inp:
+Triangle(A,B,C)
+P[1]=Midpoint(AB)
+P[2]=Midpoint(AC)
+prove:
+1. IsMedian(P1,AB)=true
+2. IsMedian(P2,AC)=true
+"#;
+    let file = parser::parse("test.geo", src).unwrap();
+    let facts = checker::build_facts_from_input(&file);
+    let _rules = rules::rule_base();
+
+    let goal1 = geo_lang::claim::Claim::pred("IsMedian", &["P1".into(), "AB".into()], Value::Bool(true));
+    assert!(facts.contains(&goal1), "P1 should be median of AB");
+
+    let goal2 = geo_lang::claim::Claim::pred("IsMedian", &["P2".into(), "AC".into()], Value::Bool(true));
+    assert!(facts.contains(&goal2), "P2 should be median of AC");
 }
