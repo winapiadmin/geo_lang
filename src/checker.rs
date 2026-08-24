@@ -206,7 +206,7 @@ fn transitive_on_closure(facts: &mut FactStore) {
         for c1 in &current {
             if let Claim::On(x, yz) = c1 {
                 // Check if yz is a segment Y-Z where Z is a midpoint of YW
-                if let Some((y, z)) = split_seg(yz) {
+                if let Some((_y, z)) = split_seg(yz) {
                     // Check if Z is midpoint of Y-W for some W
                     for c2 in &current {
                         if let Claim::On(z2, yw) = c2 {

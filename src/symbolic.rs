@@ -936,7 +936,7 @@ fn try_derive_ratio(facts: &FactStore, goal: &Claim) -> Option<Claim> {
 /// Try to resolve a ratio using coordinate arithmetic from midpoint facts.
 pub fn eval_ratio(e: &RatioExpr, coords: &LineCoords) -> Option<(i64, i64)> {
     match e {
-        RatioExpr::Seg(s) => {
+        RatioExpr::Seg(_s) => {
             // A segment on a line with endpoints 0 and 1 has length 1
             Some((1, 1))
         }

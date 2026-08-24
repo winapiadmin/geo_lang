@@ -8,7 +8,7 @@
 use crate::checker::{FactStore, Origin};
 use crate::claim::Claim;
 use crate::rules::{instantiate, match_pat, Bindings, Rule, PClaim};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 pub const MAX_DEPTH: usize = 12;
 
@@ -112,7 +112,7 @@ fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> F
     fn claim_shape(c: &Claim) -> String {
         match c {
             Claim::SegEq(_, _) => "segeq".into(),
-            Claim::PredVal { name, args, value } => {
+            Claim::PredVal { name, args, value: _ } => {
                 format!("p|{name}|{}", args.len())
             }
             Claim::On(_, _) => "on".into(),
