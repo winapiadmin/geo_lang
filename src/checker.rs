@@ -330,9 +330,9 @@ fn process_input(
             process_construction(name, geom, *pos, facts, diags, known);
         }
         InputStmt::Segment { a, b, pos } => {
-            let seg = Claim::norm_seg(&format!("{}{}", a, b));
             let an = Claim::norm_ref(a);
             let bn = Claim::norm_ref(b);
+            let seg = Claim::seg_key(&an, &bn);
             facts.add(Claim::On(an.clone(), seg.clone()), Origin::Input);
             facts.add(Claim::On(bn.clone(), seg.clone()), Origin::Input);
             facts.add(Claim::OnSegment(an, seg.clone()), Origin::Input);
@@ -340,9 +340,9 @@ fn process_input(
             let _ = pos;
         }
         InputStmt::Line { a, b, pos } => {
-            let line = Claim::norm_seg(&format!("{}{}", a, b));
             let an = Claim::norm_ref(a);
             let bn = Claim::norm_ref(b);
+            let line = Claim::seg_key(&an, &bn);
             facts.add(Claim::On(an, line.clone()), Origin::Input);
             facts.add(Claim::On(bn, line.clone()), Origin::Input);
             let _ = pos;
@@ -567,7 +567,7 @@ fn process_construction(
                             let base_n = Claim::norm_seg(base);
                             facts.add(Claim::On(n.clone(), base_n.clone()), Origin::Input);
                             facts.add(Claim::OnSegment(n.clone(), base_n), Origin::Input);
-                            let seg = format!("{}{}", point, n);
+                            let seg = Claim::seg_key(point, &n);
                             facts.add(
                                 Claim::pred(
                                     "IsPerpendicular",
@@ -593,7 +593,7 @@ fn process_construction(
                         let base_n = Claim::norm_seg(base);
                         facts.add(Claim::On(n.clone(), base_n.clone()), Origin::Input);
                         facts.add(Claim::OnSegment(n.clone(), base_n), Origin::Input);
-                        let seg = format!("{}{}", point, n);
+                        let seg = Claim::seg_key(point, &n);
                         facts.add(
                             Claim::pred(
                                 "IsPerpendicular",
@@ -610,7 +610,7 @@ fn process_construction(
                     Geom::Line { a, b, .. } => {
                         // An explicit line: the intersection point lies on it.
                         facts.add(
-                            Claim::On(n.clone(), Claim::norm_seg(&format!("{}{}", a, b))),
+                            Claim::On(n.clone(), Claim::seg_key(a, b)),
                             Origin::Input,
                         );
                     }
@@ -625,7 +625,7 @@ fn process_construction(
         }
         Geom::PerpendicularLine { point, base, pos: ppos } => {
             // A named perpendicular line: `L = PerpendicularLine(A, BC)`.
-            let seg = format!("{}{}", point, n);
+            let seg = Claim::seg_key(point, &n);
             facts.add(
                 Claim::pred("IsPerpendicular", &[seg.clone(), base.clone()], Value::Bool(true)),
                 Origin::Input,
@@ -638,7 +638,7 @@ fn process_construction(
         }
         Geom::Midpoint { a, b, pos: mpos } => {
             // `M = Midpoint(A, B)` establishes the median fact directly.
-            let seg = format!("{}{}", a, b);
+            let seg = Claim::seg_key(a, b);
             facts.add(
                 Claim::pred("IsMedian", &[n.clone(), seg.clone()], Value::Bool(true)),
                 Origin::Input,
@@ -646,13 +646,13 @@ fn process_construction(
             let seg_n = Claim::norm_seg(&seg);
             facts.add(Claim::On(n.clone(), seg_n.clone()), Origin::Input);
             facts.add(Claim::OnSegment(n.clone(), seg_n), Origin::Input);
-            facts.add(Claim::seg_eq(&format!("{}{}", n, a), &format!("{}{}", n, b)), Origin::Input);
+            facts.add(Claim::seg_eq(&Claim::seg_key(&n, a), &Claim::seg_key(&n, b)), Origin::Input);
             let _ = mpos;
         }
         Geom::AngleBisector { vertex, base, pos: bpos } => {
             // `D = AngleBisector(A, BC)`: the foot of the A-bisector on BC.
             // The bisected angle is `BAC` (vertex in the middle).
-            let seg = format!("{}{}", vertex, n);
+            let seg = Claim::seg_key(vertex, &n);
             let v = vertex.to_lowercase();
             let arms: Vec<char> = base.to_lowercase().chars().collect();
             let angle = if arms.len() == 2 {
@@ -682,7 +682,7 @@ fn process_construction(
             } else {
                 base.clone()
             };
-            let seg = format!("{}{}", vertex, n);
+            let seg = Claim::seg_key(vertex, &n);
             facts.add(
                 Claim::pred("IsAltitude", &[seg.clone(), base.clone()], Value::Bool(true)),
                 Origin::Input,
@@ -724,7 +724,7 @@ fn process_construction(
         }
         Geom::Line { a, b, pos: lpos } => {
             // `L = Line(A, B)`: both endpoints lie on the line.
-            let seg = Claim::norm_seg(&format!("{}{}", a, b));
+            let seg = Claim::seg_key(a, b);
             facts.add(Claim::On(Claim::norm_ref(a), seg.clone()), Origin::Input);
             facts.add(Claim::On(Claim::norm_ref(b), seg), Origin::Input);
             let _ = lpos;

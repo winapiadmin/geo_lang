@@ -133,19 +133,53 @@ impl Claim {
     }
 
     /// Normalize a segment reference: lower-case and orientation-free.
+    /// Supports both single-char points (e.g., "ab" -> "ab") and multi-char
+    /// points with `-` delimiter (e.g., "p1-p2" -> "p1-p2").
     pub fn norm_seg(r: &str) -> String {
-        let mut chars: Vec<char> = r.to_lowercase().chars().collect();
+        let r = r.to_lowercase();
+        if r.contains('-') {
+            let parts: Vec<&str> = r.split('-').collect();
+            if parts.len() == 2 {
+                let mut pts = [parts[0], parts[1]];
+                pts.sort_unstable();
+                return format!("{}-{}", pts[0], pts[1]);
+            }
+            return r;
+        }
+        // Legacy: single-char points concatenated (e.g., "ab")
+        let mut chars: Vec<char> = r.chars().collect();
         chars.sort_unstable();
         chars.into_iter().collect()
     }
 
-    /// Split a two-character segment reference into its two endpoint names.
-    /// Returns a vector of single-character strings (e.g., "bc" -> ["b", "c"]).
+    /// Create a segment key from two point names (orientation-free, supports multi-char).
+    /// Uses `-` delimiter only for multi-char point names; single-char points are concatenated.
+    pub fn seg_key(a: &str, b: &str) -> String {
+        let mut a = a.to_lowercase();
+        let mut b = b.to_lowercase();
+        if a.len() == 1 && b.len() == 1 {
+            // Single-char points: legacy concatenated format
+            if b < a {
+                std::mem::swap(&mut a, &mut b);
+            }
+            format!("{}{}", a, b)
+        } else {
+            // Multi-char points: use - delimiter
+            let mut pts = [a, b];
+            pts.sort_unstable();
+            format!("{}-{}", pts[0], pts[1])
+        }
+    }
+
+    /// Split a segment reference into its two endpoint names.
+    /// Supports both formats: "ab" -> ["a", "b"] and "p1-p2" -> ["p1", "p2"].
     pub fn split_ref_names(seg: &str) -> Vec<String> {
-        seg.to_lowercase()
-            .chars()
-            .map(|c| c.to_string())
-            .collect()
+        let s = seg.to_lowercase();
+        if s.contains('-') {
+            return s.split('-').map(|x| x.to_string()).collect();
+        }
+        // Legacy: single-char points
+        s.chars().map(|c| c.to_string()).collect()
     }
 
     /// Build a segment-equality claim from raw refs.

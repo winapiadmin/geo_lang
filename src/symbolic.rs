@@ -91,7 +91,7 @@ fn norm_pts(seg: &str) -> Option<(char, char)> {
 }
 
 fn seg_of(a: char, b: char) -> String {
-    Claim::norm_seg(&format!("{}{}", a, b))
+    Claim::seg_key(&a.to_string(), &b.to_string())
 }
 
 fn record_len(env: &mut NumericEnv, seg: &str, n: u32, rule: &'static str, inputs: Vec<Claim>) {
