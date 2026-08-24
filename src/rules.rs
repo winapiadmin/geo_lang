@@ -59,6 +59,7 @@ pub enum PClaim {
     PredAt(String, Vec<PExpr>, PExpr),
     On(PExpr, PExpr),
     IsoscelesAt(PExpr, PExpr),
+    OnSameCircle(Vec<PExpr>),
 }
 
 /// A single derivation rule.
@@ -255,6 +256,23 @@ pub fn match_pat(claim: &Claim, pat: &PClaim, bind: &Bindings) -> Vec<Bindings> 
             }
             out
         }
+        (Claim::OnSameCircle(pts), PClaim::OnSameCircle(pps)) => {
+            if pts.len() != pps.len() {
+                return vec![];
+            }
+            let mut cur = vec![bind.clone()];
+            for (pt, pp) in pts.iter().zip(pps.iter()) {
+                let mut next = Vec::new();
+                for b in &cur {
+                    next.extend(match_expr(pt, pp, b));
+                }
+                cur = next;
+                if cur.is_empty() {
+                    return vec![];
+                }
+            }
+            cur
+        }
         _ => vec![],
     }
 }
@@ -368,6 +386,10 @@ pub fn instantiate(pat: &PClaim, bind: &Bindings) -> Claim {
         }
         PClaim::IsoscelesAt(t, a) => {
             Claim::IsoscelesAt(render_expr(t, bind), render_expr(a, bind))
+        }
+        PClaim::OnSameCircle(pts) => {
+            let pts: Vec<String> = pts.iter().map(|p| render_expr(p, bind)).collect();
+            Claim::OnSameCircle(pts)
         }
     }
 }
@@ -1232,6 +1254,43 @@ pub fn rule_base() -> Vec<Rule> {
                 ],
                 Value::Bool(true),
             ),
+        },
+        // The circumcenter is equidistant from all vertices, so all vertices
+        // lie on the same circle (the circumcircle).
+        Rule {
+            id: "circumcenter-equidistant-circle",
+            antecedents: vec![PClaim::PredVal(
+                "iscircumcenter".into(),
+                vec![PExpr::PtVar("O".into()), PExpr::Tri3("A".into(), "B".into(), "C".into())],
+                Value::Bool(true),
+            )],
+            requires: vec![],
+            consequent: PClaim::OnSameCircle(vec![
+                PExpr::PtVar("A".into()),
+                PExpr::PtVar("B".into()),
+                PExpr::PtVar("C".into()),
+            ]),
+        },
+        // If a point is equidistant from three points, those three points
+        // lie on a circle centered at that point.
+        Rule {
+            id: "same-circle-from-equidistant",
+            antecedents: vec![
+                PClaim::SegEq(
+                    PExpr::Seg2("O".into(), "A".into()),
+                    PExpr::Seg2("O".into(), "B".into()),
+                ),
+                PClaim::SegEq(
+                    PExpr::Seg2("O".into(), "A".into()),
+                    PExpr::Seg2("O".into(), "C".into()),
+                ),
+            ],
+            requires: vec![],
+            consequent: PClaim::OnSameCircle(vec![
+                PExpr::PtVar("A".into()),
+                PExpr::PtVar("B".into()),
+                PExpr::PtVar("C".into()),
+            ]),
         },
     ]
 }

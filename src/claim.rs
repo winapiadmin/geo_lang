@@ -105,6 +105,8 @@ pub enum Claim {
     OnSegment(String, String),
     /// Point lies on an infinite line (used by numeric solver for Pythagoras).
     OnLine(String, String),
+    /// Points on the same circle (cyclic). e.g. `OnSameCircle(A,B,C)`.
+    OnSameCircle(Vec<String>),
     /// Derived from `Triangle(A,B,C,[isoscelesAt=A])`: apex of a triangle.
     IsoscelesAt(String, String),
     /// Equality of two triangles, e.g. `ABC = MNP`. Each triangle's vertices
@@ -211,6 +213,13 @@ impl Claim {
                     args.iter().map(|a| Self::norm_ref(a)).collect()
                 }
             }
+            "onsamecircle" => {
+                // OnSameCircle(A,B,C): points on the same circle.
+                // Normalize points and sort for canonical representation.
+                let mut pts: Vec<String> = args.iter().map(|a| Self::norm_ref(a)).collect();
+                pts.sort();
+                return Claim::OnSameCircle(pts);
+            }
             _ => args.iter().map(|a| Self::norm_ref(a)).collect(),
         };
         Claim::PredVal { name, args, value }
@@ -283,6 +292,7 @@ impl Claim {
             Claim::On(p, s) => p.is_empty() || s.is_empty(),
             Claim::OnSegment(p, s) => p.is_empty() || s.is_empty(),
             Claim::OnLine(p, s) => p.is_empty() || s.is_empty(),
+            Claim::OnSameCircle(pts) => pts.iter().any(|p| p.is_empty()),
             Claim::IsoscelesAt(t, a) => t.is_empty() || a.is_empty(),
             Claim::TriEq(lhs, rhs) => lhs.is_empty() || rhs.is_empty(),
             Claim::AngleEq(lhs, rhs) => lhs.is_empty() || rhs.is_empty(),
@@ -366,6 +376,7 @@ impl fmt::Display for Claim {
             Claim::On(p, s) => write!(f, "On({},{})", render_ref(p), render_ref(s)),
             Claim::OnSegment(p, s) => write!(f, "OnSegment({},{})", render_ref(p), render_ref(s)),
             Claim::OnLine(p, s) => write!(f, "OnLine({},{})", render_ref(p), render_ref(s)),
+            Claim::OnSameCircle(pts) => write!(f, "OnSameCircle({})", pts.iter().map(|p| render_ref(p)).collect::<Vec<_>>().join(",")),
             Claim::IsoscelesAt(t, a) => {
                 write!(f, "IsoscelesAt({},{})", render_ref(t), render_ref(a))
             }
@@ -458,6 +469,7 @@ pub fn display_predicate(name: &str) -> String {
         "isnone" => "IsNone".into(),
         "isoscelesat" => "IsoscelesAt".into(),
         "on" => "On".into(),
+        "onsamecircle" => "OnSameCircle".into(),
         "equals" => "Equals".into(),
         _ => {
             // Title-case fallback.
