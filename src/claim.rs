@@ -194,6 +194,41 @@ impl Claim {
             // On(point, segment/line): a first-class incidence claim.
             return Claim::On(Self::norm_ref(&args[0]), Self::norm_seg(&args[1]));
         }
+        // Helper: split concatenated multi-char point names like P1P2 -> [P1, P2].
+        // Single-letter points (AB) are handled by norm_seg.
+        fn split_multi_char_points(s: &str) -> Vec<String> {
+            let s = s.to_lowercase();
+            if s.len() < 2 {
+                return vec![s];
+            }
+            // Only split if there are digits (multi-char points).
+            // Pure letters like AB, BC should not be split.
+            if !s.chars().any(|c| c.is_ascii_digit()) {
+                return vec![s];
+            }
+            // Pattern: letter+digits? followed by letter+digits? (e.g., P1P2, P1Q)
+            let mut result = Vec::new();
+            let mut i = 0;
+            while i < s.len() {
+                let start = i;
+                // Must start with letter
+                if !s[i..].chars().next().unwrap().is_ascii_alphabetic() {
+                    i += 1;
+                    continue;
+                }
+                i += 1;
+                // Consume digits
+                while i < s.len() && s[i..].chars().next().unwrap().is_ascii_digit() {
+                    i += 1;
+                }
+                result.push(s[start..i].to_string());
+            }
+            if result.len() >= 2 {
+                result
+            } else {
+                vec![s]
+            }
+        }
         let args: Vec<String> = match name.as_str() {
             "issimilar" => {
                 // Triangle references in similarity claims are
@@ -202,13 +237,23 @@ impl Claim {
             }
             "ismedian" | "isperpendicular" | "isparallel" | "isperpendicularbisector" => {
                 if args.len() == 2 {
-                    // First arg is a point (or segment for isperpendicular), second is a segment.
-                    // Use norm_ref for point, norm_seg for segment.
-                    if name == "ismedian" || name == "isperpendicular" {
-                        vec![Self::norm_ref(&args[0]), Self::norm_seg(&args[1])]
+                    // For segment-ish predicates, split concatenated multi-char points first.
+                    let seg1 = split_multi_char_points(&args[0]);
+                    let seg2 = split_multi_char_points(&args[1]);
+                    let normalized: Vec<String> = if name == "ismedian" || name == "isperpendicular" {
+                        // First arg is a point (norm_ref), second is segment (norm_seg)
+                        vec![
+                            Self::norm_ref(&seg1.join("")),
+                            Self::norm_seg(&seg2.join("-")),
+                        ]
                     } else {
-                        vec![Self::norm_seg(&args[0]), Self::norm_seg(&args[1])]
-                    }
+                        // Both args are segments
+                        vec![
+                            Self::norm_seg(&seg1.join("-")),
+                            Self::norm_seg(&seg2.join("-")),
+                        ]
+                    };
+                    normalized
                 } else {
                     args.iter().map(|a| Self::norm_ref(a)).collect()
                 }
