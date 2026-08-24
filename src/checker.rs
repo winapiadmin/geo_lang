@@ -325,6 +325,19 @@ fn process_input(
                 }
             }
             let _ = points;
+            // Add On facts for triangle vertices on their sides
+            if points.len() == 3 {
+                let sides = [
+                    (&points[0], &points[1]),
+                    (&points[1], &points[2]),
+                    (&points[2], &points[0]),
+                ];
+                for (a, b) in sides {
+                    let seg = Claim::seg_key(a, b);
+                    facts.add(Claim::On(Claim::norm_ref(a), seg.clone()), Origin::Input);
+                    facts.add(Claim::On(Claim::norm_ref(b), seg), Origin::Input);
+                }
+            }
         }
         InputStmt::Assign { name, geom, pos } => {
             process_construction(name, geom, *pos, facts, diags, known);
