@@ -190,6 +190,7 @@ pub fn match_pat(claim: &Claim, pat: &PClaim, bind: &Bindings) -> Vec<Bindings> 
             Claim::PredVal { name, args, value },
             PClaim::PredVal(pn, pargs, pv),
         ) if name == pn && value == pv && args.len() == pargs.len() => {
+            let mut out = Vec::new();
             let mut cur = vec![bind.clone()];
             for (arg, pe) in args.iter().zip(pargs.iter()) {
                 let mut next = Vec::new();
@@ -198,7 +199,26 @@ pub fn match_pat(claim: &Claim, pat: &PClaim, bind: &Bindings) -> Vec<Bindings> 
                 }
                 cur = next;
             }
-            cur
+            out.extend(cur);
+            // Symmetric two-segment predicates also match with the fact's
+            // arguments swapped (IsPerpendicular(AI,EF) == (EF,AI)).
+            let symmetric = args.len() == 2
+                && matches!(
+                    name.as_str(),
+                    "isparallel" | "isperpendicular" | "isequal" | "equals"
+                );
+            if symmetric {
+                let mut cur = vec![bind.clone()];
+                for (arg, pe) in args.iter().rev().zip(pargs.iter()) {
+                    let mut next = Vec::new();
+                    for b in &cur {
+                        next.extend(match_expr(arg, pe, b));
+                    }
+                    cur = next;
+                }
+                out.extend(cur);
+            }
+            out
         }
         (
             Claim::PredVal { name, args, value },
@@ -1293,6 +1313,38 @@ pub fn rule_base() -> Vec<Rule> {
                 Value::Bool(true),
             ),
         },
+        // Perpendicular from parallel: if AB || CD and EF is perpendicular to CD,
+        // then AB is perpendicular to EF (parallel lines share perpendiculars).
+        Rule {
+            id: "perp-with-parallel",
+            antecedents: vec![
+                PClaim::PredVal(
+                    "isparallel".into(),
+                    vec![
+                        PExpr::Seg2("A".into(), "B".into()),
+                        PExpr::Seg2("C".into(), "D".into()),
+                    ],
+                    Value::Bool(true),
+                ),
+                PClaim::PredVal(
+                    "isperpendicular".into(),
+                    vec![
+                        PExpr::Seg2("E".into(), "F".into()),
+                        PExpr::Seg2("C".into(), "D".into()),
+                    ],
+                    Value::Bool(true),
+                ),
+            ],
+            requires: vec![],
+            consequent: PClaim::PredVal(
+                "isperpendicular".into(),
+                vec![
+                    PExpr::Seg2("A".into(), "B".into()),
+                    PExpr::Seg2("E".into(), "F".into()),
+                ],
+                Value::Bool(true),
+            ),
+        },
         // The circumcenter is equidistant from all vertices, so all vertices
         // lie on the same circle (the circumcircle).
         Rule {
@@ -1330,5 +1382,171 @@ pub fn rule_base() -> Vec<Rule> {
                 PExpr::PtVar("C".into()),
             ]),
         },
+        // Parallel transitivity: if AB || CD and CD || EF then AB || EF.
+        Rule {
+            id: "parallel-transitivity",
+            antecedents: vec![
+                PClaim::PredVal(
+                    "isparallel".into(),
+                    vec![
+                        PExpr::Seg2("A".into(), "B".into()),
+                        PExpr::Seg2("C".into(), "D".into()),
+                    ],
+                    Value::Bool(true),
+                ),
+                PClaim::PredVal(
+                    "isparallel".into(),
+                    vec![
+                        PExpr::Seg2("C".into(), "D".into()),
+                        PExpr::Seg2("E".into(), "F".into()),
+                    ],
+                    Value::Bool(true),
+                ),
+            ],
+            requires: vec![],
+            consequent: PClaim::PredVal(
+                "isparallel".into(),
+                vec![
+                    PExpr::Seg2("A".into(), "B".into()),
+                    PExpr::Seg2("E".into(), "F".into()),
+                ],
+                Value::Bool(true),
+            ),
+        },
+        // Reflection preserves distance to points of the mirror line: E is the
+        // midpoint of HM, HE is perpendicular to the mirror AB, and E lies on
+        // the mirror; then any point A of the mirror is equidistant from H
+        // and its image M (the mirror is the perpendicular bisector of HM).
+        Rule {
+            id: "mirror-preserves-distance",
+            antecedents: vec![
+                PClaim::PredVal(
+                    "ismedian".into(),
+                    vec![PExpr::PtVar("E".into()), PExpr::Seg2("H".into(), "M".into())],
+                    Value::Bool(true),
+                ),
+                PClaim::PredVal(
+                    "isperpendicular".into(),
+                    vec![
+                        PExpr::Seg2("H".into(), "E".into()),
+                        PExpr::Seg2("A".into(), "B".into()),
+                    ],
+                    Value::Bool(true),
+                ),
+            ],
+            requires: vec![
+                PClaim::On(PExpr::PtVar("E".into()), PExpr::Seg2("A".into(), "B".into())),
+            ],
+            consequent: PClaim::SegEq(
+                PExpr::Seg2("A".into(), "M".into()),
+                PExpr::Seg2("A".into(), "H".into()),
+            ),
+        },
+        // Mirrored form: the shared segment occupies the second slot.
+        Rule {
+            id: "segeq-common-transitive-rev",
+            antecedents: vec![
+                PClaim::SegEq(
+                    PExpr::Seg2("A".into(), "B".into()),
+                    PExpr::AnyRef("X".into()),
+                ),
+                PClaim::SegEq(
+                    PExpr::Seg2("A".into(), "C".into()),
+                    PExpr::AnyRef("X".into()),
+                ),
+            ],
+            requires: vec![],
+            consequent: PClaim::SegEq(
+                PExpr::Seg2("A".into(), "B".into()),
+                PExpr::Seg2("A".into(), "C".into()),
+            ),
+        },
+        // Two segments equal to a common third are equal to each other.
+        // Claims are stored pair-sorted, so the shared segment occupies the
+        // first slot of both equalities.
+        Rule {
+            id: "segeq-common-transitive",
+            antecedents: vec![
+                PClaim::SegEq(
+                    PExpr::AnyRef("X".into()),
+                    PExpr::Seg2("A".into(), "B".into()),
+                ),
+                PClaim::SegEq(
+                    PExpr::AnyRef("X".into()),
+                    PExpr::Seg2("A".into(), "C".into()),
+                ),
+            ],
+            requires: vec![],
+            consequent: PClaim::SegEq(
+                PExpr::Seg2("A".into(), "B".into()),
+                PExpr::Seg2("A".into(), "C".into()),
+            ),
+        },
+        // In an isosceles triangle the median to the base is also the altitude:
+        // AM = AN with I the midpoint of MN implies AI perpendicular to MN.
+        Rule {
+            id: "isosceles-apex-median-perpendicular",
+            antecedents: vec![
+                PClaim::SegEq(
+                    PExpr::Seg2("A".into(), "M".into()),
+                    PExpr::Seg2("A".into(), "N".into()),
+                ),
+                PClaim::PredVal(
+                    "ismedian".into(),
+                    vec![PExpr::PtVar("I".into()), PExpr::Seg2("M".into(), "N".into())],
+                    Value::Bool(true),
+                ),
+            ],
+            requires: vec![],
+            consequent: PClaim::PredVal(
+                "isperpendicular".into(),
+                vec![
+                    PExpr::Seg2("A".into(), "I".into()),
+                    PExpr::Seg2("M".into(), "N".into()),
+                ],
+                Value::Bool(true),
+            ),
+        },
+        // Nine-point configuration: with M, N the midpoints of BH, CH and J
+        // the midpoint of MN, J is the midpoint of QH where Q is the midpoint
+        // of BC; in particular Q, J, H are collinear.
+        Rule {
+            id: "nine-point-mid-collinear",
+            antecedents: vec![
+                PClaim::PredVal(
+                    "ismedian".into(),
+                    vec![PExpr::PtVar("J".into()), PExpr::Seg2("M".into(), "N".into())],
+                    Value::Bool(true),
+                ),
+                PClaim::PredVal(
+                    "ismedian".into(),
+                    vec![PExpr::PtVar("M".into()), PExpr::Seg2("B".into(), "H".into())],
+                    Value::Bool(true),
+                ),
+                PClaim::PredVal(
+                    "ismedian".into(),
+                    vec![PExpr::PtVar("N".into()), PExpr::Seg2("C".into(), "H".into())],
+                    Value::Bool(true),
+                ),
+            ],
+            requires: vec![
+                PClaim::PredVal(
+                    "ismedian".into(),
+                    vec![PExpr::PtVar("Q".into()), PExpr::Seg2("B".into(), "C".into())],
+                    Value::Bool(true),
+                ),
+            ],
+            consequent: PClaim::PredVal(
+                "iscollinear".into(),
+                vec![
+                    PExpr::PtVar("Q".into()),
+                    PExpr::PtVar("J".into()),
+                    PExpr::PtVar("H".into()),
+                ],
+                Value::Bool(true),
+            ),
+        },
     ]
 }
+
+

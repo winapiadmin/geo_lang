@@ -7,13 +7,39 @@
 
 use crate::checker::{FactStore, Origin};
 use crate::claim::Claim;
-use crate::rules::{instantiate, match_pat, Bindings, Rule};
+use crate::rules::{instantiate, match_pat, Bindings, Rule, PClaim};
 use std::collections::{HashMap, HashSet};
 
 pub const MAX_DEPTH: usize = 12;
 
 /// How many new facts the forward pass may derive per goal.
-const MAX_SATURATION: usize = 64;
+const MAX_SATURATION: usize = 20000;
+
+/// Safety cap on intermediate rule bindings per saturation pass.
+const MAX_BINDINGS: usize = 400_000;
+
+/// True for claims that are degenerate by construction, e.g. a "segment"
+/// whose endpoints coincide (`II`) — such bindings carry no geometric
+/// content and only bloat the closure.
+fn is_degenerate(c: &Claim) -> bool {
+    fn deg_seg(s: &str) -> bool {
+        let n = Claim::norm_seg(s);
+        n.len() == 2 && n.as_bytes()[0] == n.as_bytes()[1]
+    }
+    match c {
+        Claim::SegEq(a, b) => deg_seg(a) || deg_seg(b),
+        Claim::PredVal { name, args, .. } => {
+            let seg_pred = matches!(
+                name.as_str(),
+                "isparallel" | "isperpendicular" | "ismedian" | "isaltitude"
+            );
+            seg_pred
+                && args.len() == 2
+                && (deg_seg(&args[0]) || deg_seg(&args[1]))
+        }
+        _ => false,
+    }
+}
 
 /// All consequents `rule` can produce when every antecedent already matches a
 /// fact (bounded, forward chaining).
@@ -21,9 +47,12 @@ fn forward_rule_consequents(rule: &Rule, facts: &[Claim]) -> Vec<Claim> {
     let mut cur = vec![Bindings::new()];
     for ant in &rule.antecedents {
         let mut next = Vec::new();
-        for bind in &cur {
+        'outer: for bind in &cur {
             for f in facts {
                 next.extend(match_pat(f, ant, bind));
+                if next.len() > MAX_BINDINGS {
+                    break 'outer;
+                }
             }
         }
         cur = next;
@@ -44,7 +73,7 @@ fn forward_rule_consequents(rule: &Rule, facts: &[Claim]) -> Vec<Claim> {
             continue;
         }
         let c = instantiate(&rule.consequent, &bind);
-        if !c.has_unbound() && !facts.contains(&c) {
+        if !c.has_unbound() && !facts.contains(&c) && !is_degenerate(&c) {
             out.push(c);
         }
     }
@@ -54,26 +83,172 @@ fn forward_rule_consequents(rule: &Rule, facts: &[Claim]) -> Vec<Claim> {
 /// Derive the closure of `facts` under `rules` (sound forward chaining), used
 /// to seed the backward prover with facts that follow directly from the input.
 pub fn forward_saturate(facts: &FactStore, rules: &[Rule]) -> FactStore {
+    saturate_toward(facts, rules, None)
+}
+
+/// Like [`forward_saturate`] but stops as soon as `goal` becomes derivable.
+///
+/// Semi-naive evaluation: after the first pass, a rule application only
+/// contributes when at least one of its matches involves a fact derived in
+/// the previous pass, which keeps later passes proportional to the delta.
+fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> FactStore {
     let mut store = FactStore::new();
+    let mut delta: Vec<Claim> = Vec::new();
     for f in facts.all() {
-        store.add(f.clone(), Origin::Input);
+        if store.add(f.clone(), Origin::Input) {
+            delta.push(f);
+        }
     }
-    let mut changed = true;
-    while changed {
-        changed = false;
+    if let Some(g) = goal {
+        if store.contains(g) {
+            return store;
+        }
+    }
+    let base = facts.all().len();
+
+    // Join `rule` against the store; each binding remembers how many of its
+    // antecedent matches involved a *novel* (delta) fact. Facts are bucketed
+    // by shape so each antecedent only scans plausible candidates.
+    fn claim_shape(c: &Claim) -> String {
+        match c {
+            Claim::SegEq(_, _) => "segeq".into(),
+            Claim::PredVal { name, args, value } => {
+                format!("p|{name}|{}", args.len())
+            }
+            Claim::On(_, _) => "on".into(),
+            Claim::OnSegment(_, _) => "onseg".into(),
+            Claim::OnLine(_, _) => "online".into(),
+            Claim::IsoscelesAt(_, _) => "iso".into(),
+            Claim::TriEq(_, _) => "trieq".into(),
+            Claim::AngleEq(_, _) => "angle".into(),
+            Claim::RatioEq(_, _) => "ratio".into(),
+            Claim::LenEq(_, _) => "len".into(),
+            Claim::SqEq(_, _) => "sq".into(),
+            Claim::OnSameCircle(v) => format!("circ|{}", v.len()),
+        }
+    }
+
+    type Bucketed<'a> = std::collections::HashMap<String, Vec<&'a Claim>>;
+
+    fn build_index(full: &[Claim]) -> Bucketed<'_> {
+        let mut idx: Bucketed = std::collections::HashMap::new();
+        for f in full {
+            idx.entry(claim_shape(f)).or_default().push(f);
+        }
+        idx
+    }
+
+    fn join_rule(
+        rule: &Rule,
+        idx: &Bucketed,
+        delta: &std::collections::HashSet<Claim>,
+        first_pass: bool,
+    ) -> Vec<Claim> {
+        let mut cur: Vec<(Bindings, usize)> = vec![(Bindings::new(), 0)];
+        for ant in &rule.antecedents {
+            // Candidate facts: those whose shape can possibly match.
+            let mut cands: Vec<&Claim> = Vec::new();
+            collect_shape_candidates(ant, idx, &mut cands);
+            let mut next = Vec::new();
+            'outer: for (bind, dcount) in &cur {
+                for f in &cands {
+                    let novel = delta.contains(*f);
+                    for nb in match_pat(f, ant, bind) {
+                        next.push((nb, dcount + usize::from(novel)));
+                        if next.len() > MAX_BINDINGS {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            cur = next;
+            if cur.is_empty() {
+                break;
+            }
+        }
+        // Semi-naive filter: keep only bindings that used >=1 novel fact
+        // (on the first pass every fact counts as novel).
+        let mut out = Vec::new();
+        for (bind, dcount) in cur {
+            if !first_pass && dcount == 0 {
+                continue;
+            }
+            let mut ok = true;
+            for req in &rule.requires {
+                let inst = instantiate(req, &bind);
+                if inst.has_unbound() || !full_contains(idx, &inst) {
+                    ok = false;
+                    break;
+                }
+            }
+            if !ok {
+                continue;
+            }
+            let c = instantiate(&rule.consequent, &bind);
+            if !c.has_unbound() && !is_degenerate(&c) {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    // Gather all facts whose shape could possibly match `ant` (conservative:
+    // includes every bucket when the antecedent is shape-polymorphic).
+    fn collect_shape_candidates<'a>(
+        ant: &PClaim,
+        idx: &Bucketed<'a>,
+        out: &mut Vec<&'a Claim>,
+    ) {
+        use crate::rules::PClaim as P;
+        let keys: Vec<String> = match ant {
+            P::SegEq(_, _) => vec!["segeq".into()],
+            P::PredVal(n, a, _) => vec![format!("p|{}|{}", n, a.len())],
+            P::PredAt(n, a, _) => vec![format!("p|{}|{}", n, a.len() + 0)],
+            P::On(_, _) => vec!["on".into()],
+            P::IsoscelesAt(_, _) => vec!["iso".into()],
+            P::TriEq(_, _) => vec!["trieq".into()],
+            P::AngleEq(_, _) => vec!["angle".into()],
+            P::RatioEq(_, _) => vec!["ratio".into()],
+            P::OnSameCircle(v) => vec![format!("circ|{}", v.len())],
+        };
+        for k in keys {
+            if let Some(b) = idx.get(&k) {
+                out.extend(b.iter().copied());
+            }
+        }
+    }
+
+    fn full_contains(idx: &Bucketed, c: &Claim) -> bool {
+        idx.get(&claim_shape(c))
+            .map(|b| b.iter().any(|f| *f == c))
+            .unwrap_or(false)
+    }
+
+    let mut passes = 0usize;
+    while !delta.is_empty() && passes < 64 {
         let current = store.all();
+        let index = build_index(&current);
+        let delta_set: std::collections::HashSet<Claim> = delta.iter().cloned().collect();
+        let mut new_delta: Vec<Claim> = Vec::new();
         for rule in rules {
-            // Skip inverse rules (ratio -> parallel) to avoid cycles in forward saturation
             if rule.id.contains("invthales") {
                 continue;
             }
-            for c in forward_rule_consequents(rule, &current) {
-                if store.add(c, Origin::Proof(0, 0)) {
-                    changed = true;
+            for c in join_rule(rule, &index, &delta_set, passes == 0) {
+                if !store.contains(&c) {
+                    store.add(c.clone(), Origin::Proof(0, 0));
+                    new_delta.push(c.clone());
+                    if let Some(g) = goal {
+                        if g == &c {
+                            return store;
+                        }
+                    }
                 }
             }
         }
-        if store.all().len() > facts.all().len() + MAX_SATURATION {
+        delta = new_delta;
+        passes += 1;
+        if store.all().len() > base + MAX_SATURATION {
             break;
         }
     }
@@ -96,121 +271,185 @@ impl Proof {
 }
 
 /// Try to prove `goal` from `facts` using `rules`.
+///
+/// Strategy: forward-saturate the fact store (deriving every consequence the
+/// rule base can reach), then run a join-based backward pass in which every
+/// antecedent must match an established fact. This keeps the search complete
+/// over the fact space and free of partially-bound subgoals.
 pub fn prove(
     goal: &Claim,
     facts: &FactStore,
     rules: &[Rule],
     depth: usize,
 ) -> Option<Proof> {
-    prove_inner(goal, facts, rules, depth)
-}
-
-fn prove_inner(
-    goal: &Claim,
-    facts: &FactStore,
-    rules: &[Rule],
-    depth: usize,
-) -> Option<Proof> {
-    prove_inner_with_visited(goal, facts, rules, depth, &mut HashSet::new())
-}
-
-fn prove_inner_with_visited(
-    goal: &Claim,
-    facts: &FactStore,
-    rules: &[Rule],
-    depth: usize,
-    visited: &mut HashSet<Claim>,
-) -> Option<Proof> {
-    if depth > MAX_DEPTH {
-        return None;
-    }
+    let _ = depth;
     if facts.contains(goal) {
         return Some(Proof::leaf(goal.clone()));
     }
-    if visited.contains(goal) {
-        return None; // Cycle detected
-    }
-    visited.insert(goal.clone());
 
-    // Numeric derivations (lengths, ratios, Pythagoras) come before rules.
+    // Numeric derivations (lengths, ratios, coordinates, Pythagoras) come first.
     if let Some(p) = crate::symbolic::numeric_proof(goal, facts) {
-        visited.remove(goal);
         return Some(p);
     }
 
-    for rule in rules {
-        for bind in match_pat(goal, &rule.consequent, &HashMap::new()) {
-            // Satisfy each antecedent, binding variables and building sub-proofs.
-            let mut sub: Vec<Proof> = Vec::new();
-            let mut cur_bind = bind;
-            let mut ok = true;
+    let saturated = saturate_toward(facts, rules, Some(goal));
+    prove_inner(goal, &saturated, rules, facts)
+}
 
-            for ant in &rule.antecedents {
-                // Try to bind the antecedent against an existing fact first.
-                let mut bound_to_fact: Option<Claim> = None;
-                for f in facts.all() {
-                    let matches = match_pat(&f, ant, &cur_bind);
-                    if let Some(b) = matches.first() {
-                        cur_bind = b.clone();
-                        bound_to_fact = Some(f.clone());
+/// Prove `goal` against a pre-computed saturated store (see
+/// [`forward_saturate`]). Lets callers amortize one saturation across many
+/// goals; falls back to the base facts for numeric derivations.
+pub fn prove_seeded(
+    goal: &Claim,
+    facts: &FactStore,
+    saturated: &FactStore,
+    rules: &[Rule],
+) -> Option<Proof> {
+    // Numeric / coordinate derivations run against the base facts.
+    if let Some(p) = crate::symbolic::numeric_proof(goal, facts) {
+        return Some(p);
+    }
+    prove_inner(goal, saturated, rules, facts)
+}
+
+/// Join-based backward chaining: structural antecedents must match facts;
+/// *symbolic* antecedents (`RatioEq`/`LenEq`/`SqEq`/`SegEq`) may additionally
+/// be discharged by the numeric/coordinate solver over the base facts.
+/// Bindings are extended by full matches only, so no partially-instantiated
+/// claim is ever constructed.
+/// Depth budget for reconstructing nested derivation trees.
+const PROOF_DEPTH: usize = 12;
+
+fn prove_inner(
+    goal: &Claim,
+    saturated: &FactStore,
+    rules: &[Rule],
+    base: &FactStore,
+) -> Option<Proof> {
+    prove_rec(goal, saturated, rules, base, PROOF_DEPTH)
+}
+
+fn prove_rec(
+    goal: &Claim,
+    saturated: &FactStore,
+    rules: &[Rule],
+    base: &FactStore,
+    depth: usize,
+) -> Option<Proof> {
+    fn is_symbolic(p: &PClaim) -> bool {
+        matches!(
+            p,
+            PClaim::RatioEq(_, _) | PClaim::SegEq(_, _)
+        )
+    }
+    // Deterministic iteration: witnesses are chosen from a lexicographically
+    // sorted snapshot so rendered chains are stable across runs.
+    let store_snapshot: Vec<Claim> = {
+        let mut v = saturated.all();
+        v.sort_by_key(|c| c.to_string());
+        v
+    };
+    for rule in rules {
+        let (structural, symbolic): (Vec<_>, Vec<_>) = rule
+            .antecedents
+            .iter()
+            .enumerate()
+            .partition(|(_, a)| !is_symbolic(a));
+
+        for bind in match_pat(goal, &rule.consequent, &HashMap::new()) {
+            // Join the structural antecedents over the saturated store.
+            let mut cur: Vec<Bindings> = vec![bind];
+            for ant in structural.iter().map(|(_, a)| *a) {
+                let mut next: Vec<Bindings> = Vec::new();
+                for b in &cur {
+                    for f in &store_snapshot {
+                        next.extend(match_pat(&f, ant, b));
+                    }
+                    if next.len() > MAX_BINDINGS {
                         break;
                     }
                 }
-                if let Some(f) = bound_to_fact {
-                    sub.push(Proof::leaf(f));
-                    continue;
-                }
-
-                // Otherwise instantiate fully and try to prove recursively.
-                let inst = instantiate(ant, &cur_bind);
-                if inst.has_unbound() {
-                    ok = false;
+                cur = next;
+                if cur.is_empty() {
                     break;
                 }
-                match prove_inner_with_visited(&inst, facts, rules, depth + 1, visited) {
-                    Some(p) => {
-                        // Re-bind variables the recursive proof introduced.
-                        let new_binds = match_pat(&p.claim, ant, &cur_bind);
-                        match new_binds.first() {
-                            Some(b) => cur_bind = b.clone(),
-                            None => {
-                                ok = false;
-                                break;
+            }
+
+            'binds: for bind in cur {
+                let mut parts: Vec<(usize, Proof)> = Vec::new();
+                // Structural witnesses — recurse to rebuild nested derivations
+                // when the witness is itself derived (not an input fact).
+                {
+                    let mut probe = vec![bind.clone()];
+                    for &(pos, ant) in &structural {
+                        let mut witness: Option<Claim> = None;
+                        let mut survived: Vec<Bindings> = Vec::new();
+                        for b in &probe {
+                            for f in &store_snapshot {
+                                for nb in match_pat(&f, ant, b) {
+                                    if witness.is_none() {
+                                        witness = Some(f.clone());
+                                    }
+                                    survived.push(nb);
+                                }
                             }
                         }
-                        sub.push(p);
-                    }
-                    None => {
-                        ok = false;
-                        break;
+                        let w = witness?;
+                        let sub = if base.contains(&w) || depth == 0 {
+                            Proof::leaf(w)
+                        } else {
+                            prove_rec(&w, saturated, rules, base, depth - 1)
+                                .unwrap_or_else(|| Proof::leaf(w.clone()))
+                        };
+                        parts.push((pos, sub));
+                        probe = survived;
+                        if probe.len() > MAX_BINDINGS {
+                            probe.truncate(MAX_BINDINGS);
+                        }
                     }
                 }
-            }
 
-            if !ok {
-                continue;
-            }
-
-            // Side conditions must already be established facts.
-            let mut req_ok = true;
-            for req in &rule.requires {
-                let inst = instantiate(req, &cur_bind);
-                if !facts.contains(&inst) {
-                    req_ok = false;
-                    break;
+                // Symbolic antecedents: fact or numeric derivation.
+                for &(pos, ant) in &symbolic {
+                    let inst = instantiate(ant, &bind);
+                    if inst.has_unbound() {
+                        continue 'binds;
+                    }
+                    if base.contains(&inst) {
+                        parts.push((pos, Proof::leaf(inst)));
+                        continue;
+                    }
+                    if let Some(np) = crate::symbolic::numeric_proof(&inst, base) {
+                        parts.push((pos, np));
+                        continue;
+                    }
+                    if saturated.contains(&inst) {
+                        parts.push((pos, Proof::leaf(inst)));
+                        continue;
+                    }
+                    continue 'binds;
                 }
-            }
-            if req_ok {
-                visited.remove(goal);
-                return Some(Proof {
-                    claim: goal.clone(),
-                    antecedents: sub,
-                    rule: Some(rule.id),
+
+                // Side conditions must hold as facts.
+                let req_ok = rule.requires.iter().all(|req| {
+                    let inst = instantiate(req, &bind);
+                    !inst.has_unbound() && saturated.contains(&inst)
                 });
+                if req_ok {
+                    parts.sort_by_key(|(pos, _)| *pos);
+                    return Some(Proof {
+                        claim: goal.clone(),
+                        antecedents: parts.into_iter().map(|(_, p)| p).collect(),
+                        rule: Some(rule.id),
+                    });
+                }
             }
         }
     }
-    visited.remove(goal);
+    // Fall back to treating the goal as an established (derived) fact.
+    if saturated.contains(goal) {
+        return Some(Proof::leaf(goal.clone()));
+    }
     None
 }
 

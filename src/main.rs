@@ -111,6 +111,9 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
     let rules = rules::rule_base();
     let mut any_unproven = false;
 
+    // One forward closure shared by every goal (single-claim path uses it too).
+    let mut saturated = prover::forward_saturate(&facts, &rules);
+
     if let Some(goal_text) = goal_arg {
         let exprs = match parse_single_claim(goal_text) {
             Ok(e) => e,
@@ -138,7 +141,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                 println!("{}: {}  (already established)", label, display);
                 continue;
             }
-            match prover::prove(goal, &facts, &rules, 0) {
+            match prover::prove_seeded(goal, &facts, &saturated, &rules) {
                 Some(p) => {
                     println!("{}: {}", label, display);
                     println!("chain: {}", prover::render_chain(&p, Some(display)));
@@ -177,7 +180,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                         println!("{}: {}  (already established)", label, display);
                         continue;
                     }
-                    match prover::prove(g, &facts, &rules, 0) {
+                    match prover::prove_seeded(g, &facts, &saturated, &rules) {
                         Some(p) => {
                             println!("{}: {}", label, display);
                             println!("  chain: {}", prover::render_chain(&p, Some(display)));
@@ -189,6 +192,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                             // Make the goal's claim available to later goals so
                             // they can reuse it instead of re-deriving it.
                             facts.add(g.clone(), checker::Origin::Proof(goal.index, 0));
+                            saturated.add(g.clone(), checker::Origin::Proof(goal.index, 0));
                         }
                         None => {
                             println!("{}: {}  (cannot be proven)", label, display);

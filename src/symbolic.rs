@@ -684,19 +684,10 @@ fn ratio_proof(goal: &Claim, env: &NumericEnv, facts: &FactStore) -> Option<Proo
         // Try coordinate arithmetic from midpoint facts
         if let (Some(a), Some(b)) = (resolve_ratio_coords(l, facts), resolve_ratio_coords(r, facts)) {
             if a == b {
-                let mut coords = LineCoords::default();
-                derive_ratios_from_midpoints(facts, &mut coords);
-                let mut antecedents = Vec::new();
-                // Add coordinate derivation as a proof step
-                antecedents.push(Proof {
+                return Some(Proof {
                     claim: goal.clone(),
                     rule: Some("coordinate-arithmetic"),
                     antecedents: Vec::new(),
-                });
-                return Some(Proof {
-                    claim: goal.clone(),
-                    rule: Some("invthales-general"),
-                    antecedents,
                 });
             }
         }
@@ -838,28 +829,55 @@ impl LineCoords {
 }
 
 /// Derive ratios from On facts and midpoint facts using coordinate arithmetic.
-/// Derive ratios from On facts and midpoint facts using coordinate arithmetic.
+///
+/// Collinear segments are first unified into *maximal* lines: a segment is
+/// dropped as a coordinate line when both of its endpoints lie on some other
+/// segment. This makes nested midpoint chains (`D = Midpoint(AB)`,
+/// `E = Midpoint(AD)`, `F = Midpoint(DE)`, ...) share the coordinate system
+/// of `AB`, so every level of nesting resolves in one line frame.
 pub fn derive_ratios_from_midpoints(facts: &FactStore, coords: &mut LineCoords) {
-    // First, set endpoints from On facts and segment definitions
+    use std::collections::HashMap as Map;
+
+    // Collect segments and their On points.
+    let mut segs: Vec<(String, String, String)> = Vec::new(); // (key, p, q)
+    let mut on_points: Map<String, Vec<String>> = Map::new();
     for c in facts.all() {
-        match c {
-            Claim::On(p, seg) => {
-                let seg_key = Claim::norm_seg(&seg);
-                if let Some((a, b)) = split_seg(&seg_key) {
-                    coords.set_endpoints(&seg_key, &a, &b);
+        if let Claim::On(p, seg) = c {
+            let seg_key = Claim::norm_seg(&seg);
+            if let Some((a, b)) = split_seg(&seg_key) {
+                if !segs.iter().any(|(k, _, _)| k == &seg_key) {
+                    segs.push((seg_key.clone(), a.clone(), b.clone()));
+                }
+                let entry = on_points.entry(seg_key.clone()).or_default();
+                if !entry.contains(&p) {
+                    entry.push(p.clone());
                 }
             }
-            Claim::SegEq(a, b) => {
-                if let (Some((a1, a2)), Some((b1, b2))) = (split_seg(&a), split_seg(&b)) {
-                    // Segments are equal - could propagate coordinates
-                    let _ = (a1, a2, b1, b2);
-                }
-            }
-            _ => {}
         }
     }
 
-    // Process midpoint facts to derive coordinates
+    // Keep only maximal segments: drop S when some other T contains both
+    // endpoints of S among its points.
+    let mut maximal: Vec<(String, String, String)> = Vec::new();
+    for (skey, sa, sb) in &segs {
+        let dominated = segs.iter().any(|(tkey, _, _)| {
+            skey != tkey
+                && on_points
+                    .get(tkey)
+                    .map(|pts| pts.contains(sa) && pts.contains(sb))
+                    .unwrap_or(false)
+        });
+        if !dominated {
+            maximal.push((skey.clone(), sa.clone(), sb.clone()));
+        }
+    }
+
+    // Set up coordinate frames for maximal lines only.
+    for (skey, a, b) in &maximal {
+        coords.set_endpoints(skey, a, b);
+    }
+
+    // Process midpoint facts to derive coordinates (to fixpoint).
     let mut changed = true;
     let mut iteration = 0;
     while changed && iteration < 100 {
@@ -884,15 +902,10 @@ pub fn derive_ratios_from_midpoints(facts: &FactStore, coords: &mut LineCoords) 
                             found
                         };
                         if let Some(line) = line_opt {
-                            let ca = coords.get_coord(&line, &a);
-                            let cb = coords.get_coord(&line, &b);
-                            if ca.is_some() && cb.is_some() {
-                                // Only set if not already set
-                                let mid_coord = coords.get_coord(&line, mid);
-                                if mid_coord.is_none() {
-                                    coords.set_midpoint(&line, mid, &a, &b);
-                                    changed = true;
-                                }
+                            let mid_coord = coords.get_coord(&line, mid);
+                            if mid_coord.is_none() {
+                                coords.set_midpoint(&line, mid, &a, &b);
+                                changed = true;
                             }
                         }
                     }
