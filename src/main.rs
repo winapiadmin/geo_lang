@@ -243,7 +243,72 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                         deg
                                     );
                                     // Law-of-cosines chain from the triangle's
-                                    // three side lengths.
+                                    let mut chained = false;
+                                    // Tangent shortcut for right triangles:
+                                    // tan(V) = opposite/adjacent, where both
+                                    // legs touch the right-angle apex.
+                                    if let Some(t) = symbolic::find_triangle_with_vertex(
+                                        &v.to_string(),
+                                        &goal_facts,
+                                    ) {
+                                        let chars: Vec<char> = t.chars().collect();
+                                        let apex = goal_facts.all().into_iter().find_map(|c| {
+                                            match &c {
+                                                geo_lang::claim::Claim::PredVal {
+                                                    name,
+                                                    args,
+                                                    value,
+                                                } if name == "rightat"
+                                                    && args.len() == 1
+                                                    && args[0] == *t =>
+                                                {
+                                                    match value {
+                                                        geo_lang::claim::Value::Point(p) => {
+                                                            p.chars().next()
+                                                        }
+                                                        _ => None,
+                                                    }
+                                                }
+                                                _ => None,
+                                            }
+                                        });
+                                        if let Some(r) = apex {
+                                            if r != v && chars.contains(&r) {
+                                                let w: char = *chars
+                                                    .iter()
+                                                    .find(|&&c| c != v && c != r)
+                                                    .unwrap_or(&'?');
+
+                                                let opp = geo_lang::claim::Claim::seg_key(
+                                                    &r.to_string(),
+                                                    &w.to_string(),
+                                                );
+                                                let adj = geo_lang::claim::Claim::seg_key(
+                                                    &v.to_string(),
+                                                    &r.to_string(),
+                                                );
+                                                if let (Some(o), Some(a)) = (
+                                                    symbolic::solve_len(&opp, &goal_facts),
+                                                    symbolic::solve_len(&adj, &goal_facts),
+                                                ) {
+                                                    let ratio = o as f64 / a as f64;
+                                                    println!(
+                                                        "  chain: tan({})={}/{}={:.4} -> {}=arctan({:.4})~{:.2}°  [tangent]",
+                                                        angle_ref.to_uppercase(),
+                                                        opp.to_uppercase(),
+                                                        adj.to_uppercase(),
+                                                        ratio,
+                                                        angle_ref.to_uppercase(),
+                                                        ratio,
+                                                        deg
+                                                    );
+                                                    chained = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Law-of-cosines fallback.
+                                    if !chained {
                                     if let Some(t) =
                                         symbolic::find_triangle_with_vertex(&v.to_string(), &goal_facts)
                                     {
@@ -283,6 +348,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                 deg
                                             );
                                         }
+                                    }
                                     }
                                 }
                                 None => {
