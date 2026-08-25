@@ -212,6 +212,10 @@ pub fn seg_eq_closure(facts: &mut FactStore) {
         .into_iter()
         .filter_map(|c| match c {
             Claim::SegEq(a, b) => Some((a.clone(), b.clone())),
+            Claim::RadiusEq(k, side) => {
+                // Sentinel node keeps circle radii in the same length graph.
+                Some((format!("radius:{}", k), side.clone()))
+            }
             _ => None,
         })
         .collect();
@@ -319,9 +323,18 @@ pub fn circle_membership_closure(facts: &mut FactStore) {
     // Length-equality adjacency: side-string -> partner strings.
     let mut adj: HashMap<String, Vec<String>> = HashMap::new();
     for c in facts.all() {
-        if let Claim::SegEq(a, b) = c {
-            adj.entry(a.clone()).or_default().push(b.clone());
-            adj.entry(b.clone()).or_default().push(a.clone());
+        match c {
+            Claim::SegEq(a, b) => {
+                adj.entry(a.clone()).or_default().push(b.clone());
+                adj.entry(b.clone()).or_default().push(a.clone());
+            }
+            // radius:K is reachable from every length equal to the radius.
+            Claim::RadiusEq(k, side) => {
+                let node = format!("radius:{}", k);
+                adj.entry(node.clone()).or_default().push(side.clone());
+                adj.entry(side.clone()).or_default().push(node);
+            }
+            _ => {}
         }
     }
     // Reachable lengths from a given segment string (BFS, capped).
@@ -698,6 +711,36 @@ fn process_input(
         }
         InputStmt::PredFact { name, args, value, pos } => {
             facts.add(Claim::pred(name, args, value.clone()), Origin::Input);
+            // `IsRectangle(A,B,C,D)=true` (vertices in order): derive the
+            // side structure — opposite sides parallel, adjacent sides
+            // perpendicular — so the rule base can reason about it.
+            if name.eq_ignore_ascii_case("isrectangle")
+                && args.len() == 4
+                && *value == Value::Bool(true)
+            {
+                let pts: Vec<String> = args.iter().map(|p| Claim::norm_ref(p)).collect();
+                let seg = |i: usize| -> String { Claim::seg_key(&pts[i], &pts[(i + 1) % 4]) };
+                for i in 0..4 {
+                    let a = seg(i);
+                    let b = seg((i + 1) % 4);
+                    facts.add(
+                        Claim::pred(
+                            "IsPerpendicular",
+                            &[a.clone(), b],
+                            Value::Bool(true),
+                        ),
+                        Origin::Input,
+                    );
+                }
+                for i in 0..2 {
+                    let a = seg(i);
+                    let b = seg(i + 2);
+                    facts.add(
+                        Claim::pred("IsParallel", &[a.clone(), b], Value::Bool(true)),
+                        Origin::Input,
+                    );
+                }
+            }
             let _ = pos;
         }
         InputStmt::RatioEq { lhs, rhs, pos } => {
@@ -1034,11 +1077,10 @@ fn process_construction(
             if line_pts.is_none() {
                 if let Some(center) = circles.get(&Claim::norm_ref(seg)) {
                     let center = center.clone();
-                    let rk = circle_radius_key(&Claim::norm_ref(seg));
                     facts.add(
-                        Claim::seg_eq(
-                            &rk,
-                            &Claim::seg_key(&center, &n),
+                        Claim::RadiusEq(
+                            Claim::norm_ref(seg),
+                            Claim::seg_key(&center, &n),
                         ),
                         Origin::Input,
                     );
@@ -1068,27 +1110,29 @@ fn process_construction(
         Geom::Ref(_) => {}
         Geom::ParallelLine { .. } => {}
         Geom::Circle { center, radius, .. } => {
-            // `K = Circle(O[, r])`: establish the circle's radius as an
-            // internal segment `K__radius`, so ordinary length reasoning
-            // (equality propagation, numeric solver) applies to it.
+            // `K = Circle(O[, r])`: establish the circle's radius as a
+            // dedicated Radius(K)=… claim (readable, unscrambled), which
+            // the length closures treat like any other equality.
             let c = Claim::norm_ref(center);
             facts.add(
                 Claim::pred("IsCircleCenter", &[n.clone(), c.clone()], Value::Bool(true)),
                 Origin::Input,
             );
-            let rk = circle_radius_key(&n);
             match radius {
                 None => {}
                 Some(RadiusSpec::Num(v)) => {
-                    facts.add(Claim::len_eq(&rk, *v), Origin::Input);
+                    facts.add(Claim::RadiusEq(n.clone(), v.to_string()), Origin::Input);
                 }
                 Some(RadiusSpec::Seg(s)) => {
-                    facts.add(Claim::seg_eq(&rk, &Claim::norm_seg(s)), Origin::Input);
+                    facts.add(
+                        Claim::RadiusEq(n.clone(), Claim::norm_seg(s)),
+                        Origin::Input,
+                    );
                 }
                 Some(RadiusSpec::ThroughPoint(p)) => {
                     let p = Claim::norm_ref(p);
                     facts.add(
-                        Claim::seg_eq(&rk, &Claim::seg_key(&c, &p)),
+                        Claim::RadiusEq(n.clone(), Claim::seg_key(&c, &p)),
                         Origin::Input,
                     );
                     facts.add(Claim::on_circle(&p, &n), Origin::Input);

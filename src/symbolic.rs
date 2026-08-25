@@ -162,6 +162,28 @@ fn get_sq(env: &NumericEnv, seg: &str) -> Option<u32> {
 /// Compute all derivable lengths to a fixpoint.
 pub fn compute(facts: &FactStore) -> NumericEnv {
     let mut env = NumericEnv::default();
+    // Synthetic claims: RadiusEq(K, side) behaves as the equality
+    // `radius:K = side` so numeric lengths propagate onto placed points.
+    let mut extra: Vec<Claim> = Vec::new();
+    for c in facts.all() {
+        if let Claim::RadiusEq(k, side) = c {
+            let sentinel = Claim::norm_seg(&format!("radius:{}", k));
+            if let Ok(n) = side.parse::<u32>() {
+                env.lens.insert(sentinel.clone(), n);
+                if let Some(sq) = n.checked_mul(n) {
+                    env.sq.insert(sentinel.clone(), sq);
+                }
+                env.len_steps.insert(
+                    sentinel.clone(),
+                    NumStep {
+                        rule: "given",
+                        inputs: Vec::new(),
+                    },
+                );
+            }
+            extra.push(Claim::SegEq(sentinel, side.clone()));
+        }
+    }
     for c in facts.all() {
         if let Claim::LenEq(seg, n) = c {
             // Direct inputs: keep a `given` step so later derivations cannot
@@ -191,7 +213,8 @@ pub fn compute(facts: &FactStore) -> NumericEnv {
         }
     }
 
-    let claims = facts.all();
+    let mut claims = facts.all();
+    claims.extend(extra);
     // Points lying on each line, including the segment endpoints. Any of the
     // three incidence kinds implies the point is on the infinite line.
     let mut on: HashMap<String, Vec<char>> = HashMap::new();
@@ -1020,3 +1043,5 @@ pub fn eval_atom(a: &RatioAtom, coords: &LineCoords) -> Option<(i64, i64)> {
         }
     }
 }
+
+

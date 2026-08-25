@@ -97,6 +97,10 @@ pub enum Claim {
     /// Equality of two segments/refs, e.g. `BD = DC`. Segments are stored
     /// orientation-normalized (characters sorted) so `DB` == `BD`.
     SegEq(String, String),
+    /// The radius of declared circle `K` equals the length of `side`
+    /// (a center-to-point segment key or another length key).
+    /// Displayed as `Radius(K)=<side>`, kept unscrambled.
+    RadiusEq(String, String),
     /// A predicate call bound to a value, e.g. `IsMedian(D, BC) = true`.
     PredVal { name: String, args: Vec<String>, value: Value },
     /// Incidence: a point lying on a segment/line, e.g. `On(D, BC)`.
@@ -407,6 +411,7 @@ impl Claim {
     pub fn has_unbound(&self) -> bool {
         match self {
             Claim::SegEq(a, b) => a.is_empty() || b.is_empty(),
+            Claim::RadiusEq(c, s) => c.is_empty() || s.is_empty(),
             Claim::PredVal { args, .. } => args.iter().any(|a| a.is_empty()),
             Claim::On(p, s) => p.is_empty() || s.is_empty(),
             Claim::OnSegment(p, s) => p.is_empty() || s.is_empty(),
@@ -483,6 +488,9 @@ impl fmt::Display for Claim {
             Claim::SegEq(lhs, rhs) => {
                 // Without a reference orientation, render uppercase sorted.
                 write!(f, "{}={}", render_ref(lhs), render_ref(rhs))
+            }
+            Claim::RadiusEq(circle, side) => {
+                write!(f, "Radius({})={}", render_ref(circle), render_ref(side))
             }
             Claim::PredVal { name, args, value } => {
                 let disp = display_predicate(name);
@@ -591,6 +599,7 @@ pub fn display_predicate(name: &str) -> String {
         "onsamecircle" => "OnSameCircle".into(),
         "oncircle" => "OnCircle".into(),
         "iscirclecenter" => "IsCircleCenter".into(),
+        "isrectangle" => "IsRectangle".into(),
         "equals" => "Equals".into(),
         _ => {
             // Title-case fallback.

@@ -86,6 +86,7 @@ fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> F
             Claim::LenEq(_, _) => "len".into(),
             Claim::SqEq(_, _) => "sq".into(),
             Claim::OnSameCircle(v) => format!("circ|{}", v.len()),
+            Claim::RadiusEq(_, _) => "radius".into(),
         }
     }
 

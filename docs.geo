@@ -132,6 +132,9 @@ Distance(B,D)=6
 // Point-valued facts: the value after `=` may be a point name:
 //   RightAt(BDH)=D           triangle BDH has its right angle at D
 //   IsoscelesAt(T)=A         apex of an isosceles triangle
+// Compound shapes:
+//   IsRectangle(A,B,C,D)=true  vertices in order; derives opposite sides
+//   parallel and adjacent sides perpendicular
 // Optional[T] = T | ?   (an unset value `?` throws on any equality check)
 //   IsMedian(Point,Segment) -> Optional[Bool]
 
