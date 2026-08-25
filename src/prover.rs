@@ -186,6 +186,7 @@ fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> F
     }
 
     let mut passes = 0usize;
+    let mut closure_runs = 0usize;
     while !delta.is_empty() && passes < 64 {
         let current = store.all();
         let index = build_index(&current);
@@ -211,6 +212,43 @@ fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> F
         passes += 1;
         if store.all().len() > base + MAX_SATURATION {
             break;
+        }
+    }
+    // Checker-side closures may unlock new length equalities once derived
+    // facts (e.g. circumcenter equidistance) exist; stabilize.
+    while closure_runs < 4 {
+        closure_runs += 1;
+        let before = store.all().len();
+        crate::checker::seg_eq_closure(&mut store);
+        crate::checker::circle_membership_closure(&mut store);
+        if store.all().len() == before {
+            break;
+        }
+        let mut p2 = 0usize;
+        delta = store.all();
+        while !delta.is_empty() && p2 < 8 {
+            let current = store.all();
+            let index = build_index(&current);
+            let delta_set: std::collections::HashSet<Claim> = delta.iter().cloned().collect();
+            let mut new_delta: Vec<Claim> = Vec::new();
+            for rule in rules {
+                if rule.id.contains("invthales") {
+                    continue;
+                }
+                for c in join_rule(rule, &index, &delta_set, false) {
+                    if !store.contains(&c) {
+                        store.add(c.clone(), Origin::Proof(0, 0));
+                        new_delta.push(c.clone());
+                        if let Some(g) = goal {
+                            if g == &c {
+                                return store;
+                            }
+                        }
+                    }
+                }
+            }
+            delta = new_delta;
+            p2 += 1;
         }
     }
     store
@@ -507,3 +545,4 @@ pub fn render_tree(p: &Proof, indent: usize, final_display: Option<&str>) -> Str
     }
     out
 }
+

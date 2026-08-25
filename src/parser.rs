@@ -484,6 +484,38 @@ impl Parser {
                         })
                     }
                 }
+                "circle" => {
+                    // Circle(O) | Circle(O, 7) | Circle(O, AB) | Circle(O, P)
+                    toks.remove(0);
+                    expect_first_symbol(toks, '(')?;
+                    let center = expect_first_ident(toks)?.to_lowercase();
+                    let mut radius = None;
+                    if toks.first().map(|t| is_symbol(t, ',')).unwrap_or(false) {
+                        toks.remove(0);
+                        match toks.first().map(|t| t.kind.clone()) {
+                            Some(TokKind::Number(n)) => {
+                                radius = Some(RadiusSpec::Num(n));
+                                toks.remove(0);
+                            }
+                            Some(TokKind::Ident(id)) => {
+                                let low = id.to_lowercase();
+                                toks.remove(0);
+                                radius = Some(if low.chars().count() == 2
+                                    && low.chars().all(|c| c.is_ascii_alphabetic())
+                                {
+                                    RadiusSpec::Seg(low)
+                                } else {
+                                    RadiusSpec::ThroughPoint(low)
+                                });
+                            }
+                            _ => {
+                                return self.err(pos_of(&toks[0]), "expected a radius (number, segment, or point)");
+                            }
+                        }
+                    }
+                    expect_first_symbol(toks, ')')?;
+                    Ok(Geom::Circle { center, radius, pos })
+                }
                 "anglebisector" => {
                     toks.remove(0);
                     expect_first_symbol(toks, '(')?;
@@ -1031,9 +1063,10 @@ fn is_construction_word(id: &str) -> bool {
             | "altitude"
             | "circumcenter"
             | "incenter"
-            | "orthocenter"
-            | "centroid"
-            | "pointon"
+                    | "orthocenter"
+                    | "centroid"
+                    | "pointon"
+                    | "circle"
     )
 }
 

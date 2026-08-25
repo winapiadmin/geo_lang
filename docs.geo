@@ -81,6 +81,16 @@ M=Midpoint(AB)
 
 // PointOn(Segment) -> Point
 //   `D = PointOn(AB)`: a point on segment AB (On(D,AB)).
+//   `P = PointOn(K)` also accepts a declared circle: P lies on K.
+
+// Circle(Center[,Radius]) — establish a circle as a named object.
+//   K = Circle(O)        centered at O, radius left open
+//   K = Circle(O, 7)     numeric radius
+//   K = Circle(O, AB)    radius equal to the length of AB
+//   K = Circle(O, A)     through point A: radius OA, and OnCircle(A,K)
+// Place points on it with `P = PointOn(K)` (fact OnCircle(P,K)); every
+// such placement is an ordinary distance equality from the center, so
+// lengths propagate through the numeric solver and rule base.
 
 // Segment(Point,Point) and Line(Point,Point) declare a segment/line and
 // that both endpoints lie on it.
@@ -239,6 +249,7 @@ Constructions:
     Midpoint(seg)                    AngleBisector(P,seg)
     Circumcenter(tri) Incenter(tri)  Orthocenter(tri) Centroid(tri)
     PointOn(seg)                     Segment(P,P)  Line(P,P)
+    Circle(center[,radius])          radius: n | seg | through-point
 
 Facts:
     AD=3  Distance(A,D)=7            X^2=n  (squared length)

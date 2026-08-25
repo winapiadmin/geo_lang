@@ -183,6 +183,15 @@ impl Claim {
     }
 
     /// Build a segment-equality claim from raw refs.
+    /// Build a point-on-circle claim: `OnCircle(P, K)`.
+    pub fn on_circle(point: &str, circle: &str) -> Claim {
+        Claim::pred(
+            "OnCircle",
+            &[Self::norm_ref(point), Self::norm_ref(circle)],
+            Value::Bool(true),
+        )
+    }
+
     /// Build a segment-equality claim from raw refs. The two sides are
     /// stored in canonical (sorted) order so `WX=WY` and `WY=WX` denote the
     /// identical claim.
@@ -580,6 +589,8 @@ pub fn display_predicate(name: &str) -> String {
         "isoscelesat" => "IsoscelesAt".into(),
         "on" => "On".into(),
         "onsamecircle" => "OnSameCircle".into(),
+        "oncircle" => "OnCircle".into(),
+        "iscirclecenter" => "IsCircleCenter".into(),
         "equals" => "Equals".into(),
         _ => {
             // Title-case fallback.

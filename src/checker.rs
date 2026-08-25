@@ -1,7 +1,7 @@
 //! Proof checker: builds the fact store from the input section and validates
 //! every proof block, producing diagnostics in the style of the language spec.
 
-use crate::ast::{ClaimExpr, File, Geom, InputStmt, LenExpr, Scope, Step};
+use crate::ast::{ClaimExpr, File, Geom, InputStmt, LenExpr, RadiusSpec, Scope, Step};
 use crate::claim::{Claim, RatioAtom, RatioExpr, Value};
 use crate::diag::{Diagnostic, Span};
 use crate::rules::{apply_rule, find_hint, rule_base};
@@ -188,15 +188,191 @@ pub fn build_facts_from_input(file: &File) -> FactStore {
     let mut facts = FactStore::new();
     let mut diags = Vec::new();
     let known = known_perp_lines(file);
+    let circles = known_circles(file);
     for stmt in &file.input {
-        process_input(stmt, &mut facts, &mut diags, &known);
+        process_input(stmt, &mut facts, &mut diags, &known, &circles);
     }
     // Transitive closure for On facts: if X on YZ and Z on AB, then X on AB
     transitive_on_closure(&mut facts);
     // Thales: the midpoint of the hypotenuse of a right triangle is
     // equidistant from all three vertices.
     derive_right_triangle_circumcenter(&mut facts);
+    // Length-equality closure + circle-membership propagation.
+    seg_eq_closure(&mut facts);
+    circle_membership_closure(&mut facts);
     facts
+}
+
+/// Transitive closure of segment-equality facts via union-find: if AB=CD and
+/// CD=EF are known, materialize AB=EF (bounded per equivalence class).
+pub fn seg_eq_closure(facts: &mut FactStore) {
+    const MAX_GROUP: usize = 24;
+    let eqs: Vec<(String, String)> = facts
+        .all()
+        .into_iter()
+        .filter_map(|c| match c {
+            Claim::SegEq(a, b) => Some((a.clone(), b.clone())),
+            _ => None,
+        })
+        .collect();
+    if eqs.is_empty() {
+        return;
+    }
+    let mut parent: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let find = |parent: &std::collections::HashMap<String, String>, mut x: String| -> String {
+        while let Some(p) = parent.get(&x) {
+            if p == &x {
+                break;
+            }
+            x = p.clone();
+        }
+        x
+    };
+    let union = |parent: &mut std::collections::HashMap<String, String>, a: String, b: String| {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra != rb {
+            parent.insert(ra, rb);
+        }
+    };
+    for (a, b) in &eqs {
+        union(&mut parent, a.clone(), b.clone());
+    }
+    // Group members by root.
+    let mut groups: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (a, b) in &eqs {
+        for side in [a, b] {
+            let r = find(&parent, side.clone());
+            let g = groups.entry(r).or_default();
+            if !g.contains(side) {
+                g.push(side.clone());
+            }
+        }
+    }
+    // Materialize pairwise equalities within each (capped) group.
+    let mut added = Vec::new();
+    for members in groups.values() {
+        if members.len() > MAX_GROUP {
+            continue;
+        }
+        for i in 0..members.len() {
+            for j in (i + 1)..members.len() {
+                let claim = Claim::seg_eq(&members[i], &members[j]);
+                if !facts.contains(&claim) {
+                    added.push(claim);
+                }
+            }
+        }
+    }
+    for c in added {
+        facts.add(c, Origin::Input);
+    }
+}
+
+/// Propagate circle membership: if P lies on declared circle K with center O,
+/// and OQ is length-equal (transitively) to OP, then Q lies on K too.
+pub fn circle_membership_closure(facts: &mut FactStore) {
+    use std::collections::HashMap;
+    // Centers: k -> o
+    let centers: HashMap<String, String> = facts
+        .all()
+        .into_iter()
+        .filter_map(|c| match c {
+            Claim::PredVal { name, args, value }
+                if name == "iscirclecenter" && value == Value::Bool(true) && args.len() == 2 =>
+            {
+                Some((args[0].clone(), args[1].clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    if centers.is_empty() {
+        return;
+    }
+    // Memberships: k -> points P with OnCircle(P,k).
+    let mut members: HashMap<String, Vec<String>> = HashMap::new();
+    for c in facts.all() {
+        if let Claim::PredVal { name, args, value } = c {
+            if name == "oncircle" && value == Value::Bool(true) && args.len() == 2 {
+                if centers.contains_key(&args[1]) {
+                    let m = members.entry(args[1].clone()).or_default();
+                    if !m.contains(&args[0]) {
+                        m.push(args[0].clone());
+                    }
+                }
+            }
+        }
+    }
+    if members.is_empty() {
+        return;
+    }
+    // All known points (from On facts).
+    let mut points: Vec<String> = Vec::new();
+    for c in facts.all() {
+        if let Claim::On(p, _) = c {
+            if !points.contains(&p) {
+                points.push(p.clone());
+            }
+        }
+    }
+    // Length-equality adjacency: side-string -> partner strings.
+    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+    for c in facts.all() {
+        if let Claim::SegEq(a, b) = c {
+            adj.entry(a.clone()).or_default().push(b.clone());
+            adj.entry(b.clone()).or_default().push(a.clone());
+        }
+    }
+    // Reachable lengths from a given segment string (BFS, capped).
+    fn reachable(
+        start: &str,
+        adj: &HashMap<String, Vec<String>>,
+    ) -> std::collections::HashSet<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        seen.insert(start.to_string());
+        queue.push_back(start.to_string());
+        while let Some(cur) = queue.pop_front() {
+            if let Some(partners) = adj.get(&cur) {
+                for p in partners {
+                    if seen.insert(p.clone()) && seen.len() < 64 {
+                        queue.push_back(p.clone());
+                    }
+                }
+            }
+        }
+        seen
+    }
+
+    let mut changed = true;
+    let mut rounds = 0;
+    while changed && rounds < 8 {
+        changed = false;
+        for k in members.keys().cloned().collect::<Vec<String>>() {
+            let ps = members[&k].clone();
+            let o = centers[&k].clone();
+            for p in &ps {
+                let sp = Claim::seg_key(&o, p);
+                let reach = reachable(&sp, &adj);
+                for q in &points {
+                    if q == p {
+                        continue;
+                    }
+                    let sq = Claim::seg_key(&o, q);
+                    if reach.contains(&sq) {
+                        let g = members.entry(k.clone()).or_default();
+                        if !g.contains(q) {
+                            g.push(q.clone());
+                            facts.add(Claim::on_circle(q, &k), Origin::Input);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        rounds += 1;
+    }
 }
 
 /// For every right triangle `T` with `rightAt = V` and every midpoint `W` of
@@ -343,14 +519,34 @@ fn known_perp_lines(file: &File) -> std::collections::HashMap<String, (String, S
     m
 }
 
+/// The canonical radius key of a declared circle: an internal segment name
+/// whose length is the circle's radius.
+pub fn circle_radius_key(circle: &str) -> String {
+    format!("{}__radius", Claim::norm_ref(circle))
+}
+
+/// Collect declared circles: `K = Circle(O, ...)` maps `k` -> center.
+fn known_circles(file: &File) -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    for stmt in &file.input {
+        if let InputStmt::Assign { name, geom, .. } = stmt {
+            if let Geom::Circle { center, .. } = geom {
+                m.insert(Claim::norm_ref(name), Claim::norm_ref(center));
+            }
+        }
+    }
+    m
+}
+
 /// Check a whole file, returning diagnostics.
 pub fn check(file: &File) -> Vec<Diagnostic> {
     let mut facts = FactStore::new();
     let mut diags = Vec::new();
     let known = known_perp_lines(file);
+    let circles = known_circles(file);
 
     for stmt in &file.input {
-        process_input(stmt, &mut facts, &mut diags, &known);
+        process_input(stmt, &mut facts, &mut diags, &known, &circles);
     }
 
     diags.extend(apply_proofs(file, &mut facts));
@@ -367,6 +563,7 @@ fn process_input(
     facts: &mut FactStore,
     diags: &mut Vec<Diagnostic>,
     known: &std::collections::HashMap<String, (String, String)>,
+    circles: &std::collections::HashMap<String, String>,
 ) {
     match stmt {
         InputStmt::Triangle { name, points, props, pos } => {
@@ -447,7 +644,7 @@ fn process_input(
             }
         }
         InputStmt::Assign { name, geom, pos } => {
-            process_construction(name, geom, *pos, facts, diags, known);
+            process_construction(name, geom, *pos, facts, diags, known, circles);
         }
         InputStmt::Segment { a, b, pos } => {
             let an = Claim::norm_ref(a);
@@ -641,6 +838,7 @@ fn process_construction(
     facts: &mut FactStore,
     diags: &mut Vec<Diagnostic>,
     known: &std::collections::HashMap<String, (String, String)>,
+    circles: &std::collections::HashMap<String, String>,
 ) {
     let n = Claim::norm_ref(name);
 
@@ -831,6 +1029,24 @@ fn process_construction(
             let _ = cpos;
         }
         Geom::PointOn { seg, line_pts, pos: ppos } => {
+            // `P = PointOn(K)` where K is a declared circle: P lies on K,
+            // i.e. its distance from the center equals the radius.
+            if line_pts.is_none() {
+                if let Some(center) = circles.get(&Claim::norm_ref(seg)) {
+                    let center = center.clone();
+                    let rk = circle_radius_key(&Claim::norm_ref(seg));
+                    facts.add(
+                        Claim::seg_eq(
+                            &rk,
+                            &Claim::seg_key(&center, &n),
+                        ),
+                        Origin::Input,
+                    );
+                    facts.add(Claim::on_circle(&n, seg), Origin::Input);
+                    let _ = ppos;
+                    return;
+                }
+            }
             // `D = PointOn(AB)`: the point lies on the segment/line.
             let seg_n = Claim::norm_seg(seg);
             facts.add(Claim::On(n.clone(), seg_n.clone()), Origin::Input);
@@ -851,6 +1067,34 @@ fn process_construction(
         }
         Geom::Ref(_) => {}
         Geom::ParallelLine { .. } => {}
+        Geom::Circle { center, radius, .. } => {
+            // `K = Circle(O[, r])`: establish the circle's radius as an
+            // internal segment `K__radius`, so ordinary length reasoning
+            // (equality propagation, numeric solver) applies to it.
+            let c = Claim::norm_ref(center);
+            facts.add(
+                Claim::pred("IsCircleCenter", &[n.clone(), c.clone()], Value::Bool(true)),
+                Origin::Input,
+            );
+            let rk = circle_radius_key(&n);
+            match radius {
+                None => {}
+                Some(RadiusSpec::Num(v)) => {
+                    facts.add(Claim::len_eq(&rk, *v), Origin::Input);
+                }
+                Some(RadiusSpec::Seg(s)) => {
+                    facts.add(Claim::seg_eq(&rk, &Claim::norm_seg(s)), Origin::Input);
+                }
+                Some(RadiusSpec::ThroughPoint(p)) => {
+                    let p = Claim::norm_ref(p);
+                    facts.add(
+                        Claim::seg_eq(&rk, &Claim::seg_key(&c, &p)),
+                        Origin::Input,
+                    );
+                    facts.add(Claim::on_circle(&p, &n), Origin::Input);
+                }
+            }
+        }
     }
     let _ = pos;
 }
@@ -1185,3 +1429,9 @@ pub fn atom_display_strings(expr: &ClaimExpr) -> Vec<String> {
         _ => vec![render_expr(expr)],
     }
 }
+
+
+
+
+
+

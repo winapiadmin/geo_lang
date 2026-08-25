@@ -170,6 +170,25 @@ pub enum Geom {
         line_pts: Option<(String, String)>,
         pos: Pos,
     },
+    /// A declared circle: `K = Circle(O)`, `K = Circle(O, 7)`,
+    /// `K = Circle(O, AB)` (radius equal to length AB), or
+    /// `K = Circle(O, P)` (circle through point P, i.e. radius OP).
+    Circle {
+        center: String,
+        radius: Option<RadiusSpec>,
+        pos: Pos,
+    },
+}
+
+/// The radius part of a `Circle` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RadiusSpec {
+    /// Numeric radius: `Circle(O, 7)`.
+    Num(u32),
+    /// Radius equal to a segment length: `Circle(O, AB)`.
+    Seg(String),
+    /// Circle through a point: `Circle(O, P)` — radius is OP and P lies on it.
+    ThroughPoint(String),
 }
 
 /// The kind of a triangle-center construction.
@@ -194,7 +213,8 @@ impl Geom {
             | Geom::Altitude { pos, .. }
             | Geom::Center { pos, .. }
             | Geom::Line { pos, .. }
-            | Geom::PointOn { pos, .. } => *pos,
+            | Geom::PointOn { pos, .. }
+            | Geom::Circle { pos, .. } => *pos,
         }
     }
 }
