@@ -1438,13 +1438,17 @@ pub fn rule_base() -> Vec<Rule> {
                     ],
                     Value::Bool(true),
                 ),
+                // The point whose distances are preserved: any point of the
+                // mirror line.
+                PClaim::On(
+                    PExpr::PtVar("P".into()),
+                    PExpr::Seg2("A".into(), "B".into()),
+                ),
             ],
-            requires: vec![
-                PClaim::On(PExpr::PtVar("E".into()), PExpr::Seg2("A".into(), "B".into())),
-            ],
+            requires: vec![],
             consequent: PClaim::SegEq(
-                PExpr::Seg2("A".into(), "M".into()),
-                PExpr::Seg2("A".into(), "H".into()),
+                PExpr::Seg2("P".into(), "M".into()),
+                PExpr::Seg2("P".into(), "H".into()),
             ),
         },
         // Mirrored form: the shared segment occupies the second slot.
