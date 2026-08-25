@@ -225,7 +225,11 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, LexError> {
         let tok = toks[i].clone();
         if let TokKind::Ident(name) = &tok.kind {
             let lname = name.to_lowercase();
-            let keyword = lname == "proof" || lname == "proofproperties";
+            let keyword = lname == "proof"
+                || lname == "proofproperties"
+                || lname == "inputproperties"
+                || lname == "inp"
+                || lname == "input";
             if !keyword
                 && i + 3 < toks.len()
                 && matches!(toks[i + 1].kind, TokKind::Symbol('['))

@@ -1,6 +1,6 @@
 //! geo_lang: a proof checker and prover for the `.geo` geometry language.
 
-use geo_lang::{ast, checker, diag, parser, prover, rules};
+use geo_lang::{ast, checker, diag, parser, prover, rules, symbolic};
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -161,7 +161,170 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
         }
     } else {
         for goal in &file.goals {
+            // Apply this goal's scoped inputs (`inp[N]:` sections).
+            let mut scoped_stmts: Vec<&geo_lang::ast::InputStmt> = Vec::new();
+            for (idx, stmt) in &file.scoped_input {
+                if *idx == goal.index {
+                    scoped_stmts.push(stmt);
+                }
+            }
+            // inputProperties[N][Scope]: Local keeps this goal's declarations
+            // (and everything derived from them) private to the goal; Global
+            // feeds them into the shared fact store.
+            let scope = file
+                .input_props
+                .iter()
+                .find(|p| p.index == goal.index)
+                .map(|p| p.scope)
+                .unwrap_or(ast::Scope::Global);
+            let mut goal_facts = facts.clone();
+            if !scoped_stmts.is_empty() {
+                match scope {
+                    ast::Scope::Local => {
+                        checker::apply_input_statements(&mut goal_facts, &scoped_stmts);
+                        saturated = prover::forward_saturate(&goal_facts, &rules);
+                    }
+                    ast::Scope::Global => {
+                        checker::apply_input_statements(&mut facts, &scoped_stmts);
+                        goal_facts = facts.clone();
+                        saturated = prover::forward_saturate(&facts, &rules);
+                    }
+                }
+            }
+
+            // `Calc(...)` goals evaluate numerically instead of proving.
+            if !goal.calcs.is_empty() {
+                for c in &goal.calcs {
+                    match c {
+                        geo_lang::ast::CalcSpec::Len(lx) => {
+                            let seg = lx.seg();
+                            match symbolic::solve_len(&seg, &goal_facts) {
+                                Some(v) => {
+                                    println!(
+                                        "goal {}: Calc({}) = {}",
+                                        goal.index,
+                                        checker::atom_display_len(lx),
+                                        v
+                                    );
+                                    // Derivation chain from the numeric solver.
+                                    let claim = geo_lang::claim::Claim::len_eq(&seg, v);
+                                    if let Some(p) =
+                                        symbolic::numeric_proof(&claim, &goal_facts)
+                                    {
+                                        println!(
+                                            "  chain: {}",
+                                            prover::render_chain(&p, None)
+                                        );
+                                    }
+                                }
+                                None => {
+                                    println!(
+                                        "goal {}: Calc({}) = ? (length not determined)",
+                                        goal.index,
+                                        checker::atom_display_len(lx)
+                                    );
+                                    any_unproven = true;
+                                }
+                            }
+                        }
+                        geo_lang::ast::CalcSpec::Angle(angle_ref) => {
+                            // Angle(A B C): the vertex is the MIDDLE letter.
+                            let v: char = angle_ref.chars().nth(1).unwrap_or('?');
+                            let tri =
+                                symbolic::find_triangle_with_vertex(&v.to_string(), &goal_facts);
+                            match tri
+                                .and_then(|t| symbolic::angle_degrees(&t, v, &goal_facts))
+                            {
+                                Some(deg) => {
+                                    println!(
+                                        "goal {}: Calc(Angle({})) = {:.2}°",
+                                        goal.index,
+                                        angle_ref.to_uppercase(),
+                                        deg
+                                    );
+                                    // Law-of-cosines chain from the triangle's
+                                    // three side lengths.
+                                    if let Some(t) =
+                                        symbolic::find_triangle_with_vertex(&v.to_string(), &goal_facts)
+                                    {
+                                        let chars: Vec<char> = t.chars().collect();
+                                        let apex_pos = chars
+                                            .iter()
+                                            .position(|&c| c == v)
+                                            .unwrap_or(0);
+                                        let o1 = chars[(apex_pos + 1) % 3];
+                                        let o2 = chars[(apex_pos + 2) % 3];
+                                        let sides: Vec<String> = [
+                                            (v, o1),
+                                            (v, o2),
+                                            (o1, o2),
+                                        ]
+                                        .iter()
+                                        .filter_map(|(a, b)| {
+                                            let key = geo_lang::claim::Claim::seg_key(
+                                                &a.to_string(),
+                                                &b.to_string(),
+                                            );
+                                            symbolic::solve_len(&key, &goal_facts).map(|n| {
+                                                format!(
+                                                    "{}{}={}",
+                                                    a.to_uppercase(),
+                                                    b.to_uppercase(),
+                                                    n
+                                                )
+                                            })
+                                        })
+                                        .collect();
+                                        if sides.len() == 3 {
+                                            println!(
+                                                "  chain: ({}) -> Angle({})={:.2}°  [law-of-cosines]",
+                                                sides.join(" && "),
+                                                angle_ref.to_uppercase(),
+                                                deg
+                                            );
+                                        }
+                                    }
+                                }
+                                None => {
+                                    println!(
+                                        "goal {}: Calc(Angle({})) = ? (cannot be determined)",
+                                        goal.index,
+                                        angle_ref.to_uppercase()
+                                    );
+                                    any_unproven = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             if let Some(claim) = &goal.claim {
+                // Trig sum goals are verified numerically.
+                if let ast::ClaimExpr::Sum { lhs, rhs, .. } = claim {
+                    if symbolic::sum_solves(lhs, rhs, &goal_facts) {
+                        let display = checker::render_expr(claim);
+                        let premises = symbolic::sum_premises(lhs, rhs, &goal_facts);
+                        if premises.is_empty() {
+                            println!("goal {}: {}  (numeric)", goal.index, display);
+                        } else {
+                            println!("goal {}: {}", goal.index, display);
+                            println!(
+                                "  chain: ({}) -> {}  [numeric]",
+                                premises.join(" && "),
+                                display
+                            );
+                        }
+                    } else {
+                        println!(
+                            "goal {}: {}  (cannot be proven)",
+                            goal.index,
+                            checker::render_expr(claim)
+                        );
+                        any_unproven = true;
+                    }
+                    continue;
+                }
                 let atoms = checker::claim_atoms(claim);
                 if atoms.is_empty() {
                     println!("goal {}: invalid claim", goal.index);
@@ -180,7 +343,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                         println!("{}: {}  (already established)", label, display);
                         continue;
                     }
-                    match prover::prove_seeded(g, &facts, &saturated, &rules) {
+                    match prover::prove_seeded(g, &goal_facts, &saturated, &rules) {
                         Some(p) => {
                             println!("{}: {}", label, display);
                             println!("  chain: {}", prover::render_chain(&p, Some(display)));
@@ -256,3 +419,5 @@ fn main() -> ExitCode {
         }
     }
 }
+
+

@@ -56,10 +56,22 @@ impl LenExpr {
     }
 }
 
-/// An expression appearing in a proof: a single claim or a chain of claims
-/// joined by `->`.
-#[derive(Debug, Clone)]
-pub enum ClaimExpr {
+    /// A product of an optional length and an optional `cos(angle)` factor,
+    /// used inside a `Sum` claim. `BC` is `{ len: Some(BC), cos: None }`;
+    /// `AB*cos(B)` is `{ len: Some(AB), cos: Some("B") }`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SumTerm {
+        pub len: Option<LenExpr>,
+        /// Vertex letter whose cosine to take (in the context triangle).
+        pub cos_angle: Option<String>,
+        /// Unary minus applied to this term.
+        pub neg: bool,
+    }
+
+    /// An expression appearing in a proof: a single claim or a chain of claims
+    /// joined by `->`.
+    #[derive(Debug, Clone)]
+    pub enum ClaimExpr {
     /// An equality (possibly chained) of length expressions, e.g.
     /// `BD=DC` or `Distance(B,D)=Distance(C,D)=Distance(A,D)`.
     EqChain { items: Vec<LenExpr>, pos: Pos },
@@ -79,6 +91,14 @@ pub enum ClaimExpr {
     /// Equality of two triangles, e.g. `ABC = MNP`. The user's vertex order
     /// is preserved for display; semantically, permutations of either side
     /// are equivalent.
+    /// Equality of two linear trig forms, e.g.
+    /// `BC = AB*cos(B) + AC*cos(C)`. A term is a product of an optional
+    /// length and an optional `cos(vertex)` factor.
+    Sum {
+        lhs: Vec<SumTerm>,
+        rhs: Vec<SumTerm>,
+        pos: Pos,
+    },
     TriEq { lhs: String, rhs: String, pos: Pos },
     /// Equality of two triangles written with the `Triangle(...)` wrapper,
     /// e.g. `Triangle(ABC)=Triangle(MNP)` (used to disambiguate from angle
@@ -94,14 +114,15 @@ pub enum ClaimExpr {
     },
 }
 
-impl ClaimExpr {
-    pub fn pos(&self) -> Pos {
-        match self {
-            ClaimExpr::EqChain { pos, .. }
-            | ClaimExpr::PredEq { pos, .. }
-            | ClaimExpr::PredCall { pos, .. }
-            | ClaimExpr::Conj { pos, .. }
-            | ClaimExpr::TriEq { pos, .. }
+    impl ClaimExpr {
+        pub fn pos(&self) -> Pos {
+            match self {
+                ClaimExpr::EqChain { pos, .. }
+                | ClaimExpr::PredEq { pos, .. }
+                | ClaimExpr::PredCall { pos, .. }
+                | ClaimExpr::Conj { pos, .. }
+                | ClaimExpr::Sum { pos, .. }
+                | ClaimExpr::TriEq { pos, .. }
             | ClaimExpr::TriCall { pos, .. }
             | ClaimExpr::AngleEq { pos, .. }
             | ClaimExpr::RatioEq { pos, .. } => *pos,
@@ -288,11 +309,22 @@ impl InputStmt {
     }
 }
 
+/// An evaluation request inside a goal: `Calc(AB)` or `Calc(Angle(ABC))`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CalcSpec {
+    /// Print the length of a segment / distance expression.
+    Len(LenExpr),
+    /// Print the measure (degrees) of an angle `ABC` (vertex = middle).
+    Angle(String),
+}
+
 /// A numbered goal from the `prove:` section, e.g. `1. BD=DC`.
 #[derive(Debug, Clone)]
 pub struct Goal {
     pub index: u32,
     pub claim: Option<ClaimExpr>,
+    /// `Calc(...)` items requested by this goal; evaluated numerically.
+    pub calcs: Vec<CalcSpec>,
     #[allow(dead_code)]
     pub pos: Pos,
 }
@@ -353,7 +385,12 @@ pub struct File {
     /// Raw source lines for diagnostic display.
     pub lines: Vec<String>,
     pub input: Vec<InputStmt>,
+    /// Statements from `inp[N]:` sections, applied only while proving goal N.
+    pub scoped_input: Vec<(u32, InputStmt)>,
+    /// `inputProperties[N][Scope]=Local | Global`.
+    pub input_props: Vec<ProofProp>,
     pub goals: Vec<Goal>,
     pub props: Vec<ProofProp>,
     pub proofs: Vec<ProofBlock>,
 }
+

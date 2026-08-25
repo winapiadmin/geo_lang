@@ -351,6 +351,53 @@ fn propagate(env: &mut NumericEnv, claims: &[Claim], on: &HashMap<String, Vec<ch
         }
     }
 
+    // Right triangles declared via `rightAt`: hypotenuse squared equals the
+    // sum of the leg squares, so any two known sides yield the third.
+    for c in claims {
+        if let Claim::PredVal { name, args, value } = c {
+            if name != "rightat" || args.len() != 1 {
+                continue;
+            }
+            let apex = match value {
+                Value::Point(p) => p.clone(),
+                _ => continue,
+            };
+            let tri = &args[0];
+            let chars: Vec<char> = tri.chars().collect();
+            if chars.len() != 3 {
+                continue;
+            }
+            let apex: char = apex.chars().next().unwrap_or('\0');
+            if !chars.contains(&apex) {
+                continue;
+            }
+            let others: Vec<char> = chars.iter().copied().filter(|&c| c != apex).collect();
+            if others.len() != 2 {
+                continue;
+            }
+            let hyp = seg_of(others[0], others[1]);
+            let leg1 = seg_of(apex, others[0]);
+            let leg2 = seg_of(apex, others[1]);
+            let h_sq = get_sq(env, &hyp);
+            let l1_sq = get_sq(env, &leg1);
+            let l2_sq = get_sq(env, &leg2);
+            // hyp² = l1² + l2²
+            if let (Some(a), Some(b), None) = (l1_sq, l2_sq, get_sq(env, &hyp)) {
+                if let Some(total) = a.checked_add(b) {
+                    record_sq(env, &hyp, total, "right-triangle", vec![]);
+                }
+            } else if let (Some(h), Some(a), None) = (h_sq, l1_sq, get_sq(env, &leg2)) {
+                if h > a {
+                    record_sq(env, &leg2, h - a, "right-triangle", vec![]);
+                }
+            } else if let (Some(h), Some(b), None) = (h_sq, l2_sq, get_sq(env, &leg1)) {
+                if h > b {
+                    record_sq(env, &leg1, h - b, "right-triangle", vec![]);
+                }
+            }
+        }
+    }
+
     // Pythagoras: `xy` perpendicular to `zw` with foot `h` on `zw` makes a
     // right triangle `(x, p, h)` for every point `p` on the line `zw`.
     for c in claims {
@@ -516,6 +563,197 @@ pub fn numeric_solves(goal: &Claim, facts: &FactStore) -> bool {
     }
 }
 
+// ---- trigonometric evaluation (prob5-style goals) ----
+
+/// Cosine of the angle at vertex `vertex` inside triangle `tri` (3 chars,
+/// one of which is `vertex`), computed by the law of cosines from known
+/// side lengths. Returns None unless all three sides are known.
+pub fn cos_of_vertex(tri: &str, vertex: char, facts: &FactStore) -> Option<f64> {
+    let chars: Vec<char> = tri.chars().collect();
+    if chars.len() != 3 || !chars.contains(&vertex) {
+        return None;
+    }
+    let others: Vec<char> = chars.iter().copied().filter(|&c| c != vertex).collect();
+    if others.len() != 2 {
+        return None;
+    }
+    let adj1 = solve_len(&Claim::norm_seg(&format!("{}{}", vertex, others[0])), facts)? as f64;
+    let adj2 = solve_len(&Claim::norm_seg(&format!("{}{}", vertex, others[1])), facts)? as f64;
+    let opp = solve_len(&Claim::seg_key(&others[0].to_string(), &others[1].to_string()), facts)? as f64;
+    if adj1 <= 0.0 || adj2 <= 0.0 {
+        return None;
+    }
+    Some((adj1 * adj1 + adj2 * adj2 - opp * opp) / (2.0 * adj1 * adj2))
+}
+
+/// Evaluate a `Sum` claim numerically: both sides must resolve to equal
+/// values. Length terms use propagated lengths; `cos(V)` factors resolve
+/// against a declared triangle containing vertex V whose sides are known.
+pub fn sum_solves(
+    lhs: &[crate::ast::SumTerm],
+    rhs: &[crate::ast::SumTerm],
+    facts: &FactStore,
+) -> bool {
+    // Candidate triangles: every declared triangle fact.
+    let triangles: Vec<String> = facts
+        .all()
+        .into_iter()
+        .filter_map(|c| match c {
+            Claim::PredVal { name, args, value }
+                if name == "triangle" && value == Value::Bool(true) && args.len() == 1 =>
+            {
+                Some(args[0].clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    let eval_side = |terms: &[crate::ast::SumTerm]| -> Option<f64> {
+        let mut total = 0.0f64;
+        for t in terms {
+            if t.neg {
+                return None; // unsupported in this first version
+            }
+            let mut v = 1.0f64;
+            if let Some(l) = &t.len {
+                let seg = l.seg();
+                if l.is_num() || seg.is_empty() {
+                    v *= l.numeric()? as f64;
+                } else {
+                    v *= solve_len(&seg, facts)? as f64;
+                }
+            }
+            if let Some(vertex) = &t.cos_angle {
+                // Resolve the triangle containing this vertex with all
+                // sides known; try each candidate.
+                let mut found = None;
+                for tri in &triangles {
+                    if let Some(c) = cos_of_vertex(tri, vertex.chars().next()?, facts) {
+                        found = Some(c);
+                        break;
+                    }
+                }
+                v *= found?;
+            }
+            total += v;
+        }
+        Some(total)
+    };
+    match (eval_side(lhs), eval_side(rhs)) {
+        (Some(a), Some(b)) => (a - b).abs() < 1e-9,
+        _ => false,
+    }
+}
+
+/// Find a declared triangle containing the given vertex.
+pub fn find_triangle_with_vertex(vertex: &str, facts: &FactStore) -> Option<String> {
+    facts.all().into_iter().find_map(|c| match c {
+        Claim::PredVal { name, args, value }
+            if name == "triangle" && value == Value::Bool(true) && args.len() == 1 =>
+        {
+            if args[0].contains(vertex) {
+                Some(args[0].clone())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    })
+}
+
+/// Measure of the angle at `vertex` inside `tri`, in degrees, via the law of
+/// cosines from propagated side lengths.
+pub fn angle_degrees(tri: &str, vertex: char, facts: &FactStore) -> Option<f64> {
+    let c = cos_of_vertex(tri, vertex, facts)?;
+    Some(c.acos() * 180.0 / std::f64::consts::PI)
+}
+/// Premise strings for a `Sum` goal: every segment length (with its solved
+/// value) and every cosine (with its computed value) that the numeric
+/// evaluation relied on. Used to render a proof chain.
+pub fn sum_premises(
+    lhs: &[crate::ast::SumTerm],
+    rhs: &[crate::ast::SumTerm],
+    facts: &FactStore,
+) -> Vec<String> {
+    let triangles: Vec<String> = facts
+        .all()
+        .into_iter()
+        .filter_map(|c| match c {
+            Claim::PredVal { name, args, value }
+                if name == "triangle" && value == Value::Bool(true) && args.len() == 1 =>
+            {
+                Some(args[0].clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mut out = Vec::new();
+    for t in lhs.iter().chain(rhs.iter()) {
+        if let Some(l) = &t.len {
+            let seg = l.seg();
+            if !l.is_num() && !seg.is_empty() {
+                if let Some(n) = solve_len(&seg, facts) {
+                    let disp = if seg.chars().count() == 2 {
+                        format!(
+                            "Distance({},{})={}",
+                            seg.chars().next().unwrap().to_uppercase(),
+                            seg.chars().nth(1).unwrap().to_uppercase(),
+                            n
+                        )
+                    } else {
+                        format!("Length({})={}", seg.to_uppercase(), n)
+                    };
+                    if !out.contains(&disp) {
+                        out.push(disp);
+                    }
+                }
+            }
+        }
+        if let Some(vertex) = &t.cos_angle {
+            let v = vertex.chars().next().unwrap_or('?');
+            for tri in &triangles {
+                if let Some(c) = cos_of_vertex(tri, v, facts) {
+                    let disp = format!("cos({})={:.4}", vertex.to_uppercase(), c);
+                    if !out.contains(&disp) {
+                        out.push(disp);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Numeric acuteness: all three sides known and the largest angle strictly
+/// acute (largest side squared < sum of other squares).
+fn acute_solves(tri: &str, facts: &FactStore) -> bool {    let chars: Vec<char> = tri.chars().collect();
+    if chars.len() != 3 {
+        return false;
+    }
+    let sides = [
+        Claim::seg_key(&chars[0].to_string(), &chars[1].to_string()),
+        Claim::seg_key(&chars[1].to_string(), &chars[2].to_string()),
+        Claim::seg_key(&chars[2].to_string(), &chars[0].to_string()),
+    ];
+    let lens: Vec<u32> = match sides
+        .iter()
+        .map(|s| solve_len(s, facts))
+        .collect::<Vec<Option<u32>>>()
+    {
+        v if v.iter().all(|x| x.is_some()) => v.into_iter().map(|x| x.unwrap()).collect(),
+        _ => return false,
+    };
+    let mut sorted = lens.clone();
+    sorted.sort_unstable();
+    // Degenerate or zero sides are not acute triangles.
+    if sorted[0] == 0 {
+        return false;
+    }
+    (sorted[2] as u64 * sorted[2] as u64) < (sorted[0] as u64).pow(2) + (sorted[1] as u64).pow(2)
+}
+
 /// Build a proof tree that explains a numeric derivation: how `seg` got its
 /// length `n` step by step (segment addition, isosceles legs, Pythagoras...).
 pub fn numeric_proof(goal: &Claim, facts: &FactStore) -> Option<Proof> {
@@ -541,6 +779,22 @@ pub fn numeric_proof(goal: &Claim, facts: &FactStore) -> Option<Proof> {
             None
         }
         Claim::RatioEq(_, _) => ratio_proof(goal, &env, facts),
+        // Numeric acuteness: all sides known, largest angle strictly acute.
+        Claim::PredVal { name, args, value }
+            if name == "isacute"
+                && *value == Value::Bool(true)
+                && args.len() == 1 =>
+        {
+            if acute_solves(&args[0], facts) {
+                Some(Proof {
+                    claim: goal.clone(),
+                    rule: Some("numeric-angle"),
+                    antecedents: Vec::new(),
+                })
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -1043,5 +1297,7 @@ pub fn eval_atom(a: &RatioAtom, coords: &LineCoords) -> Option<(i64, i64)> {
         }
     }
 }
+
+
 
 

@@ -23,7 +23,7 @@ pub struct Fact {
 }
 
 /// A store of established facts.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FactStore {
     map: HashMap<Claim, Fact>,
 }
@@ -105,6 +105,8 @@ pub fn claim_atoms(expr: &ClaimExpr) -> Vec<Claim> {
         ClaimExpr::TriCall { lhs, rhs, .. } => vec![Claim::tri_eq(lhs, rhs)],
         ClaimExpr::AngleEq { lhs, rhs, .. } => vec![Claim::angle_eq(lhs, rhs)],
         ClaimExpr::RatioEq { lhs, rhs, .. } => vec![Claim::ratio_eq(lhs, rhs)],
+        // Sums are verified numerically by the prover, not as atomic facts.
+        ClaimExpr::Sum { .. } => vec![],
     }
 }
 
@@ -135,6 +137,16 @@ fn expr_len(expr: &ClaimExpr) -> usize {
     match expr {
         ClaimExpr::EqChain { items, .. } => {
             items.iter().map(len_expr_len).sum::<usize>() + (items.len() - 1)
+        }
+        ClaimExpr::Sum { lhs, rhs, .. } => {
+            let term_len = |t: &crate::ast::SumTerm| -> usize {
+                t.len.as_ref().map(len_expr_len).unwrap_or(3)
+                    + t.cos_angle.as_ref().map(|a| a.len() + 4).unwrap_or(0)
+                    + 1
+            };
+            let total: usize =
+                lhs.iter().map(&term_len).sum::<usize>() + rhs.iter().map(&term_len).sum::<usize>();
+            total
         }
         ClaimExpr::PredEq { name, args, value, .. } => {
             let args_len: usize =
@@ -181,6 +193,22 @@ fn ratio_expr_len(e: &RatioExpr) -> usize {
         RatioExpr::Seg(s) => s.len(),
         RatioExpr::Quot { num, den } => ratio_atom_len(num) + 1 + ratio_atom_len(den),
     }
+}
+
+/// Apply a batch of input statements (e.g. a goal's scoped `inp[N]:`
+/// section) to an existing fact store.
+pub fn apply_input_statements(facts: &mut FactStore, stmts: &[&InputStmt]) {
+    let known = std::collections::HashMap::new();
+    let circles = std::collections::HashMap::new();
+    for stmt in stmts {
+        process_input(stmt, facts, &mut Vec::new(), &known, &circles);
+    }
+    seg_eq_closure(facts);
+}
+
+/// Display string for a length expression (used by Calc goals).
+pub fn atom_display_len(e: &LenExpr) -> String {
+    render_len_expr(e)
 }
 
 /// Build the fact store from only the input section (used by the prover).
@@ -581,6 +609,26 @@ fn process_input(
     match stmt {
         InputStmt::Triangle { name, points, props, pos } => {
             let tri = Claim::norm_ref(name);
+            // Record the triangle itself so cos() resolution can find it.
+            facts.add(
+                Claim::pred("Triangle", &[tri.clone()], Value::Bool(true)),
+                Origin::Input,
+            );
+            // Degenerate triangle: two or more coincident vertices.
+            {
+                let mut seen: Vec<String> = Vec::new();
+                for p in points {
+                    let pn = Claim::norm_ref(p);
+                    if seen.contains(&pn) {
+                        diags.push(Diagnostic::error(
+                            span_of(*pos, 10),
+                            format!("degenerate triangle: repeated vertex `{}`", p),
+                        ));
+                        break;
+                    }
+                    seen.push(pn);
+                }
+            }
             validate_triangle_props(props, *pos, diags);
             for (pname, pval) in props {
                 match pname.as_str() {
@@ -1416,6 +1464,28 @@ pub fn render_expr(expr: &ClaimExpr) -> String {
             let parts: Vec<String> = items.iter().map(render_len_expr).collect();
             parts.join("=")
         }
+        ClaimExpr::Sum { lhs, rhs, .. } => {
+            fn term(t: &crate::ast::SumTerm) -> String {
+                use std::fmt::Write;
+                let mut s = String::new();
+                if let Some(l) = &t.len {
+                    let _ = write!(s, "{}", render_len_expr(l));
+                }
+                if let Some(a) = &t.cos_angle {
+                    if !s.is_empty() {
+                        s.push('*');
+                    }
+                    let _ = write!(s, "cos({})", a.to_uppercase());
+                }
+                if t.neg {
+                    s.insert(0, '-');
+                }
+                s
+            }
+            let l: Vec<String> = lhs.iter().map(term).collect();
+            let r: Vec<String> = rhs.iter().map(term).collect();
+            format!("{}={}", l.join("+"), r.join("+"))
+        }
         ClaimExpr::PredEq { name, args, value, .. } => {
             let a: Vec<String> = args.iter().map(|s| s.to_uppercase()).collect();
             let base = format!("{}({})", display_predicate(name), a.join(","));
@@ -1473,6 +1543,7 @@ pub fn atom_display_strings(expr: &ClaimExpr) -> Vec<String> {
         _ => vec![render_expr(expr)],
     }
 }
+
 
 
 

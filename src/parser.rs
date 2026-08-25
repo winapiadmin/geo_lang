@@ -4,15 +4,6 @@ use crate::ast::*;
 use crate::claim::{RatioAtom, RatioExpr, Value};
 use crate::token::{TokKind, Token};
 
-/// A parse error.
-#[derive(Debug, Clone)]
-pub struct ParseError {
-    pub pos: Pos,
-    pub msg: String,
-}
-
-type Toks = Vec<Token>;
-
 pub fn parse(source: &str, src_text: &str) -> Result<File, ParseError> {
     let toks = crate::token::tokenize(src_text).map_err(|e| ParseError {
         pos: Pos {
@@ -25,15 +16,23 @@ pub fn parse(source: &str, src_text: &str) -> Result<File, ParseError> {
     Parser::new(source, lines, toks).parse_file()
 }
 
-struct Parser {
-    source: String,
-    lines: Vec<String>,
-    toks: Toks,
+#[derive(Debug, Clone)]
+pub struct ParseError {
+    pub pos: Pos,
+    pub msg: String,
 }
+
+type Toks = Vec<Token>;
 
 /// A logical line of tokens (a statement).
 struct Line {
     toks: Vec<Token>,
+}
+
+struct Parser {
+    source: String,
+    lines: Vec<String>,
+    toks: Toks,
 }
 
 impl Parser {
@@ -93,6 +92,8 @@ impl Parser {
             source: self.source.clone(),
             lines: self.lines.clone(),
             input: Vec::new(),
+            scoped_input: Vec::new(),
+            input_props: Vec::new(),
             goals: Vec::new(),
             props: Vec::new(),
             proofs: Vec::new(),
@@ -106,6 +107,8 @@ impl Parser {
             Prove,
         }
         let mut section = Section::None;
+        // `inp[N]:` header index: statements that follow are scoped to goal N.
+        let mut scoped: Option<u32> = None;
         let mut in_proof: Option<ProofBlock> = None;
 
         for line in lines {
@@ -116,13 +119,30 @@ impl Parser {
 
             if let Some(TokKind::Ident(id)) = head {
                 let low = id.to_lowercase();
-                if low == "inp" || low == "input" {
+                let is_inp = low == "inp" || low == "input";
+                // `inp[N]:` — indexed variant whose statements are scoped to
+                // goal N. Tokens: inp [ N ] :
+                if is_inp {
                     section = Section::Input;
+                    scoped = None;
+                    // Optional [N] before the colon.
+                    if line.toks.len() >= 5
+                        && matches!(line.toks[1].kind, TokKind::Symbol('['))
+                        && matches!(line.toks[2].kind, TokKind::Number(n))
+                        && matches!(line.toks[3].kind, TokKind::Symbol(']'))
+                        && matches!(line.toks[4].kind, TokKind::Symbol(':'))
+                    {
+                        if let TokKind::Number(n) = line.toks[2].kind {
+                            scoped = Some(n);
+                        }
+                        continue;
+                    }
                     self.expect_colon(&line)?;
                     continue;
                 }
                 if low == "prove" {
                     section = Section::Prove;
+                    scoped = None;
                     self.expect_colon(&line)?;
                     continue;
                 }
@@ -133,7 +153,20 @@ impl Parser {
                     return self.err(pos_of(&line.toks[0]), "expected `inp:` or `prove:` section");
                 }
                 Section::Input => {
-                    self.parse_input_stmt(&line, &mut file.input)?;
+                    // `inputProperties[N][Scope]=…` may appear anywhere.
+                    if is_input_property(&line) {
+                        let prop = self.parse_input_prop(&line)?;
+                        file.input_props.push(prop);
+                        continue;
+                    }
+                    let mut stmts = Vec::new();
+                    self.parse_input_stmt_into(&line, &mut stmts)?;
+                    for s in stmts {
+                        match scoped {
+                            Some(idx) => file.scoped_input.push((idx, s)),
+                            None => file.input.push(s),
+                        }
+                    }
                 }
                 Section::Prove => {
                     // A new `proof[N]:` header closes the previous proof block.
@@ -151,6 +184,14 @@ impl Parser {
                         }
                         let prop = self.parse_proof_prop(&line)?;
                         file.props.push(prop);
+                        continue;
+                    }
+                    if is_input_property(&line) {
+                        if let Some(p) = in_proof.take() {
+                            file.proofs.push(p);
+                        }
+                        let prop = self.parse_input_prop(&line)?;
+                        file.input_props.push(prop);
                         continue;
                     }
                     if is_goal_line(&line) {
@@ -204,6 +245,14 @@ impl Parser {
     }
 
     // ---- input statements ----
+
+    fn parse_input_stmt_into(
+        &self,
+        line: &Line,
+        out: &mut Vec<InputStmt>,
+    ) -> Result<(), ParseError> {
+        self.parse_input_stmt(line, out)
+    }
 
     fn parse_input_stmt(&self, line: &Line, out: &mut Vec<InputStmt>) -> Result<(), ParseError> {
         let t = &line.toks[0];
@@ -537,6 +586,24 @@ impl Parser {
                 "pointon" => {
                     toks.remove(0);
                     expect_first_symbol(toks, '(')?;
+                    // `PointOn(Ray(H,C))`: a point on the ray from H through C.
+                    if toks.len() >= 2
+                        && matches!(&toks[0].kind, TokKind::Ident(id) if id.eq_ignore_ascii_case("ray"))
+                        && is_symbol(&toks[1], '(')
+                    {
+                        toks.remove(0); // ray
+                        expect_first_symbol(toks, '(')?;
+                        let a = expect_first_ident(toks)?;
+                        expect_first_symbol(toks, ',')?;
+                        let b = expect_first_ident(toks)?;
+                        expect_first_symbol(toks, ')')?;
+                        expect_first_symbol(toks, ')')?;
+                        return Ok(Geom::PointOn {
+                            seg: format!("{}{}", a, b),
+                            line_pts: Some((a, b)),
+                            pos,
+                        });
+                    }
                     let inner = self.parse_geom(toks)?;
                     expect_first_symbol(toks, ')')?;
                     match inner {
@@ -586,6 +653,42 @@ impl Parser {
 
     // ---- prove section ----
 
+    fn parse_input_prop(&self, line: &Line) -> Result<ProofProp, ParseError> {
+        let pos = pos_of(&line.toks[0]);
+        let toks = &line.toks;
+        let mut k = 0;
+        if !is_ident_word(&toks[k], "inputproperties") {
+            return self.err(pos, "expected `inputProperties`");
+        }
+        k += 1;
+        expect_symbol(toks, &mut k, '[')?;
+        let index = match &toks[k].kind {
+            TokKind::Number(n) => *n,
+            _ => return self.err(pos_of(&toks[k]), "expected input index"),
+        };
+        k += 1;
+        expect_symbol(toks, &mut k, ']')?;
+        expect_symbol(toks, &mut k, '[')?;
+        if !is_ident_word(&toks[k], "scope") {
+            return self.err(pos_of(&toks[k]), "expected `Scope` property");
+        }
+        k += 1;
+        expect_symbol(toks, &mut k, ']')?;
+        expect_symbol(toks, &mut k, '=')?;
+        let scope = if is_ident_word(&toks[k], "local") {
+            Scope::Local
+        } else if is_ident_word(&toks[k], "global") {
+            Scope::Global
+        } else {
+            return self.err(pos_of(&toks[k]), "expected `Local` or `Global`");
+        };
+        k += 1;
+        if k != toks.len() {
+            return self.err(pos_of(&toks[k]), "unexpected tokens");
+        }
+        Ok(ProofProp { index, scope, pos })
+    }
+
     fn parse_goal(&self, line: &Line) -> Result<Goal, ParseError> {
         let pos = pos_of(&line.toks[0]);
         let toks = &line.toks;
@@ -603,6 +706,45 @@ impl Parser {
             return Ok(Goal {
                 index,
                 claim: None,
+                calcs: Vec::new(),
+                pos,
+            });
+        }
+        // `Calc(...)` items: `N. Calc(AB)` or `N. Calc(AB), Calc(Angle(ABC))`.
+        if k < toks.len() && is_ident_word(&toks[k], "calc") {
+            let mut calcs = Vec::new();
+            loop {
+                k += 1; // 'calc'
+                expect_symbol(toks, &mut k, '(')?;
+                let t = toks.get(k).ok_or(ParseError {
+                    pos: Pos { line: 0, col: 0 },
+                    msg: "expected Calc argument".into(),
+                })?;
+                let spec = match &t.kind {
+                    TokKind::Ident(id) if id.eq_ignore_ascii_case("angle") => {
+                        k += 1;
+                        expect_symbol(toks, &mut k, '(')?;
+                        let inner = expect_ident(toks, &mut k)?.to_lowercase();
+                        expect_symbol(toks, &mut k, ')')?;
+                        CalcSpec::Angle(inner)
+                    }
+                    _ => CalcSpec::Len(self.parse_len_expr(toks, &mut k)?),
+                };
+                expect_symbol(toks, &mut k, ')')?;
+                calcs.push(spec);
+                if k < toks.len() && is_symbol(&toks[k], ',') {
+                    k += 1;
+                    continue;
+                }
+                break;
+            }
+            if k != toks.len() {
+                return self.err(pos_of(&toks[k]), "unexpected tokens after goal");
+            }
+            return Ok(Goal {
+                index,
+                claim: None,
+                calcs,
                 pos,
             });
         }
@@ -617,6 +759,7 @@ impl Parser {
         Ok(Goal {
             index,
             claim: Some(claims[0].clone()),
+            calcs: Vec::new(),
             pos,
         })
     }
@@ -777,6 +920,64 @@ impl Parser {
         self.parse_claim_atom(toks, k)
     }
 
+    /// One product-term of a linear trig form: an optional length multiplied
+    /// by an optional `cos(vertex)` factor (at least one must be present),
+    /// e.g. `BC`, `AB*cos(B)`.
+    fn parse_sum_term(
+        &self,
+        toks: &[Token],
+        k: &mut usize,
+    ) -> Result<crate::ast::SumTerm, ParseError> {
+        let mut len: Option<LenExpr> = None;
+        let mut cos_angle: Option<String> = None;
+        loop {
+            // Product separator.
+            if let Some(t) = toks.get(*k) {
+                if is_symbol(t, '*') {
+                    *k += 1;
+                    continue;
+                }
+            }
+            // Length factor: a segment ref or Distance(a,b).
+            if let Some(t) = toks.get(*k) {
+                if let TokKind::Ident(id) = &t.kind {
+                    if !id.eq_ignore_ascii_case("cos") {
+                        if len.is_some() {
+                            return self.err(pos_of(t), "unexpected second length factor");
+                        }
+                        len = Some(self.parse_len_expr(toks, k)?);
+                        continue;
+                    }
+                }
+            }
+            // cos(vertex) factor.
+            if let Some(t) = toks.get(*k) {
+                if let TokKind::Ident(id) = &t.kind {
+                    if id.eq_ignore_ascii_case("cos") {
+                        *k += 1;
+                        expect_symbol(toks, k, '(')?;
+                        let v = expect_ident(toks, k)?.to_lowercase();
+                        expect_symbol(toks, k, ')')?;
+                        if cos_angle.is_some() {
+                            return self.err(pos_of(t), "unexpected second cos factor");
+                        }
+                        cos_angle = Some(v);
+                        continue;
+                    }
+                }
+            }
+            break;
+        }
+        if len.is_none() && cos_angle.is_none() {
+            return self.err(pos_of(&toks[*k]), "expected a length or cos(...) in trig term");
+        }
+        Ok(crate::ast::SumTerm {
+            len,
+            cos_angle,
+            neg: false,
+        })
+    }
+
     fn parse_claim_atom(&self, toks: &[Token], k: &mut usize) -> Result<ClaimExpr, ParseError> {
         let t = toks.get(*k).ok_or(ParseError {
             pos: Pos { line: 0, col: 0 },
@@ -788,6 +989,41 @@ impl Parser {
             _ => return self.err(pos, "expected an identifier"),
         };
         *k += 1;
+
+        // Linear trig form: `BC = AB*cos(B) + AC*cos(C)` (a `*` or `cos`
+        // appears on the right-hand side).
+        if *k < toks.len() && is_symbol(&toks[*k], '=') {
+            let rest_is_trig = toks[*k + 1..].windows(2).any(|w| {
+                matches!(&w[0].kind, TokKind::Ident(id) if id.eq_ignore_ascii_case("cos"))
+                    || is_symbol(&w[0], '*')
+                    || is_symbol(&w[1], '*')
+            });
+            if rest_is_trig {
+                expect_symbol(toks, k, '=')?;
+                // The identifier already consumed (`name`) is the left side.
+                let lhs = vec![crate::ast::SumTerm {
+                    len: Some(LenExpr::Seg(name)),
+                    cos_angle: None,
+                    neg: false,
+                }];
+                let mut rhs = vec![self.parse_sum_term(toks, k)?];
+                while *k < toks.len()
+                    && (is_symbol(&toks[*k], '+') || is_symbol(&toks[*k], '-'))
+                {
+                    let neg = is_symbol(&toks[*k], '-');
+                    *k += 1;
+                    let mut term = self.parse_sum_term(toks, k)?;
+                    if neg {
+                        term.neg = true;
+                    }
+                    rhs.push(term);
+                }
+                if *k != toks.len() {
+                    return self.err(pos_of(&toks[*k]), "unexpected tokens in trig equality");
+                }
+                return Ok(ClaimExpr::Sum { lhs, rhs, pos });
+            }
+        }
 
         // Ratio equality: `BD/DC = AB/AC`.
         if *k < toks.len() && is_symbol(&toks[*k], '/') {
@@ -1198,8 +1434,18 @@ fn is_proof_property(line: &Line) -> bool {
         && is_symbol(&line.toks[1], '[')
 }
 
+fn is_input_property(line: &Line) -> bool {
+    line.toks.len() >= 2
+        && is_ident_word(&line.toks[0], "inputproperties")
+        && is_symbol(&line.toks[1], '[')
+}
+
 fn is_goal_line(line: &Line) -> bool {
     line.toks.len() >= 2
         && matches!(&line.toks[0].kind, TokKind::Number(_))
         && is_symbol(&line.toks[1], '.')
 }
+
+
+
+
