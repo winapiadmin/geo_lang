@@ -17,8 +17,9 @@
 
   `geo_lang check <file.geo>`  validates every proof step against the built-in
   geometry rule base and reports errors/warnings with source positions.
-  `geo_lang prove <file.geo>`  auto-proves every goal with a numeric solver and
-  prints a derivation chain.
+  `geo_lang prove <file.geo>`  auto-proves every goal with the rule base, a
+  numeric length/ratio/Pythagoras solver, and rational coordinate arithmetic,
+  then prints a derivation chain.
 
   The language is case-insensitive and whitespace/indentation-insensitive:
       Prependicular == perpendicularline == PERPENDICULARLINE
@@ -116,8 +117,19 @@ Distance(B,D)=6
 // Predicates: Predicate(args)=Bool
 //   IsParallel(seg,seg), IsPerpendicular(seg,seg), IsMedian(point,seg),
 //   IsIsosceles(tri), IsSimilar(tri,tri), IsAngleBisector(seg,angle), ...
+//   OnSameCircle(A,B,C)      points on one circle (any argument order)
+//   IsCollinear(P,Q,R)       three collinear points
+// Point-valued facts: the value after `=` may be a point name:
+//   RightAt(BDH)=D           triangle BDH has its right angle at D
+//   IsoscelesAt(T)=A         apex of an isosceles triangle
 // Optional[T] = T | ?   (an unset value `?` throws on any equality check)
 //   IsMedian(Point,Segment) -> Optional[Bool]
+
+// Indexed points: `P[1]` and `P1` are the same identifier, so
+//   P[1]=Midpoint(AB)  P[2]=Midpoint(AC)
+// is equivalent to using P1 and P2 everywhere. Segments between multi-
+// character points are written with a hyphen (`P1-P2`) or as
+// Distance(P1,P2); inside predicates `P1P2` also works.
 
 // Ratio equality: AD/DB=AE/EC  or  WZ/BC=1/2
 
@@ -159,11 +171,19 @@ Nothing
 --------------------------------------------------------------------------
 
 `geo_lang prove <file.geo>` (or `<file.geo> <claim>`) runs the auto-prover.
-It derives lengths/squares/ratios to a fixpoint and prints a derivation chain
-for each goal. Derivation rules seen in chains:
+It forward-saturates the fact store under the rule base, then answers each
+goal by join-based backward chaining; lengths/squares/ratios are derived
+numerically and collinear midpoint chains by rational coordinate
+arithmetic. Derivation names seen in chains and trees:
 
-    given              a numeric input fact (rendered [fact])
-    segment-addition   AC = AH + HC            (points on a line)
+    given                  a numeric input fact (rendered [fact])
+    midsegment-parallel    joining two side midpoints is parallel to the base
+    midsegment-half-length WZ/BC = 1/2 for the same configuration
+    thales / invthales     parallel cuts <-> proportional ratios
+    perp-with-parallel     parallels share perpendiculars
+    parallel-transitivity  AB||CD && CD||EF -> AB||EF
+    coordinate-arithmetic  ratio equality on a line via rational coordinates
+    segment-addition       AC = AH + HC            (points on a line)
     segment-subtraction
     segment-equality   swapping AB=AC / BC=AC
     isosceles-legs     AB=AC from isoscelesAt=A
@@ -171,6 +191,9 @@ for each goal. Derivation rules seen in chains:
     square / sqrt      length <-> length^2 bookkeeping
     numeric-equality   two lengths equal
     numeric            ratio equality from lengths
+    reflection-midpoint      RD=DA on one line makes D the midpoint of AR
+    mirror-preserves-distance every point of a mirror line is equidistant
+                             from a point and its mirror image
 
 Example (see tests/fixtures/numeval1.geo):
 
@@ -223,6 +246,8 @@ Facts:
     the segment between the two endpoints A and D.
     Angle(ABC)=Angle(MNP)            Triangle(ABC)=Triangle(MNP)
     Pred(args)=true|false            AD/DB=AE/EC   WZ/BC=1/2  (segments only)
+    OnSameCircle(A,B,C)=true         IsCollinear(P,Q,R)=true
+    RightAt(T)=P   (point-valued: right-angle vertex of triangle T)
 
 Proofs:
     A -> B -> C        chain of claims
