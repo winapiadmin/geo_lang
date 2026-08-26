@@ -978,8 +978,9 @@ pub fn sum_trig_steps(
             hyp_disp
         ));
         let vd = vch.to_uppercase();
-        lines.push(format!("={}/{}", format!("{}^2", vd), hyp_disp));
-        sq_parts.push(format!("{}^2", vd));
+        let sq_name = format!("{}^2", ld);
+        lines.push(format!("={}/{}", sq_name, hyp_disp));
+        sq_parts.push(sq_name);
     }
 
     // Combined + Pythagorean closure.
