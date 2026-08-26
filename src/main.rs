@@ -365,16 +365,29 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                     symbolic::solve_len(&opp, &goal_facts),
                                                     symbolic::solve_len(&adj, &goal_facts),
                                                 ) {
-                                                    let ratio = o as f64 / a as f64;
+                                                    // Reduced fraction.
+                                                    let (mut n, mut d) = (o, a);
+                                                    while d != 0 {
+                                                        let t = n % d;
+                                                        n = d;
+                                                        d = t;
+                                                    }
+                                                    let g = if n == 0 { 1 } else { n };
+                                                    let (fn_, fd) = (o / g, a / g);
+                                                    let deg_tan =
+                                                        (o as f64 / a as f64).atan() * 180.0
+                                                            / std::f64::consts::PI;
                                                     println!(
-                                                        "  proof: tan({})={}/{}={:.4} -> {}=arctan({:.4})={:.2}\u{00b0}",
+                                                        "  proof: tan({})={}/{}={}/{} -> {}=arctan({}/{})={:.2}\u{00b0}",
                                                         angle_ref.to_uppercase(),
                                                         opp.to_uppercase(),
                                                         adj.to_uppercase(),
-                                                        ratio,
+                                                        fn_,
+                                                        fd,
                                                         angle_ref.to_uppercase(),
-                                                        ratio,
-                                                        deg
+                                                        fn_,
+                                                        fd,
+                                                        deg_tan
                                                     );
                                                     chained = true;
                                                 }
