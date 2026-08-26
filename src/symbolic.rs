@@ -976,25 +976,13 @@ pub fn sum_trig_steps(
         let l1d = format!("{}{}", apex_u, others[0].to_uppercase());
         let l2d = format!("{}{}", apex_u, others[1].to_uppercase());
         lines.push(format!(
-            "AB*AB/BC+AC*AC/BC=({}^2+{}^2)/{}",
-            l1d, l2d, hyp_disp
+            "{}^2/{}+{}^2/{}=({}^2+{}^2)/{}",
+            l1d, hyp_disp, l2d, hyp_disp, l1d, l2d, hyp_disp
         ));
         lines.push(format!(
-            "={}/{}={}",
+            "={}^2/{}={}",
             hyp_disp, hyp_disp, hyp_disp
         ));
-
-        // Final step: LHS segment equals RHS via identity.
-        for t in lhs {
-            if let Some(l) = &t.len {
-                let s = l.seg();
-                let s_disp: String = s.chars().flat_map(|c| c.to_uppercase()).collect();
-                if s.chars().count() == 2 && !s.contains(apex) {
-                    lines.push(format!("={}", s_disp));
-                    break;
-                }
-            }
-        }
     }
 
     lines

@@ -261,7 +261,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                     let l1d = format!("{}{}", apex.to_uppercase(), o1.to_uppercase());
                                                     let l2d = format!("{}{}", apex.to_uppercase(), o2.to_uppercase());
                                                     println!(
-                                                        "// (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2+{}^2)={}",
+                                                        "(RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2+{}^2)={}",
                                                         tri_u, apex.to_uppercase(),
                                                         disp_seg, l1d, l2d,
                                                         disp_seg, l1d, l2d, v
@@ -282,7 +282,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                     );
                                                     if let (Some(hv), Some(ov)) = (hv, ov) {
                                                         println!(
-                                                            "// (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2-{}^2)=sqrt({}-{})={}",
+                                                            "(RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2-{}^2)=sqrt({}-{})={}",
                                                             tri_u, apex.to_uppercase(),
                                                             disp_seg, other_leg, disp_hyp,
                                                             disp_seg, disp_hyp, other_leg,
@@ -300,6 +300,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                         "// Calc({}) = ? (length not determined)",
                                         checker::atom_display_len(lx)
                                     );
+                                    println!(" Nothing");
                                     any_unproven = true;
                                 }
                             }
@@ -318,17 +319,28 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                         angle_ref.to_uppercase(),
                                         deg
                                     );
-                                    // Law-of-cosines chain from the triangle's
+                                    // Choose sin/cos/tan based on Sum goal context.
                                     let mut chained = false;
-                                    // Tangent shortcut for right triangles:
-                                    // tan(V) = opposite/adjacent, where both
-                                    // legs touch the right-angle apex.
+                                    let mut want_trig = String::from("cos");
+                                    for g in &file.goals {
+                                        if let Some(ast::ClaimExpr::Sum { rhs, .. }) = &g.claim {
+                                            for t in rhs {
+                                                if let Some(a) = &t.cos_angle {
+                                                    if a.to_uppercase() == angle_ref.to_uppercase() {
+                                                        want_trig = String::from("cos");
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Right triangle: choose sin/cos/tan.
                                     if let Some(t) = symbolic::find_triangle_with_vertex(
                                         &v.to_string(),
                                         &goal_facts,
                                     ) {
                                         let chars: Vec<char> = t.chars().collect();
-                                        let apex = goal_facts.all().into_iter().find_map(|c| {
+                                        let right_apex = goal_facts.all().into_iter().find_map(|c| {
                                             match &c {
                                                 geo_lang::claim::Claim::PredVal {
                                                     name,
@@ -348,50 +360,60 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                 _ => None,
                                             }
                                         });
-                                        if let Some(r) = apex {
+                                        if let Some(r) = right_apex {
                                             if r != v && chars.contains(&r) {
                                                 let w: char = *chars
                                                     .iter()
                                                     .find(|&&c| c != v && c != r)
                                                     .unwrap_or(&'?');
-
+                                                let seg = |a: char, b: char| -> String {
+                                                    format!("{}{}", a.to_uppercase(), b.to_uppercase())
+                                                };
                                                 let opp = geo_lang::claim::Claim::seg_key(
-                                                    &r.to_string(),
-                                                    &w.to_string(),
-                                                );
+                                                    &r.to_string(), &w.to_string());
                                                 let adj = geo_lang::claim::Claim::seg_key(
-                                                    &v.to_string(),
-                                                    &r.to_string(),
-                                                );
-                                                if let (Some(o), Some(a)) = (
-                                                    symbolic::solve_len(&opp, &goal_facts),
-                                                    symbolic::solve_len(&adj, &goal_facts),
-                                                ) {
-                                                    // Reduced fraction.
-                                                    let (mut n, mut d) = (o, a);
-                                                    while d != 0 {
-                                                        let t = n % d;
-                                                        n = d;
-                                                        d = t;
+                                                    &v.to_string(), &r.to_string());
+                                                let hyp = geo_lang::claim::Claim::seg_key(
+                                                    &v.to_string(), &w.to_string());
+                                                let ov = symbolic::solve_len(&opp, &goal_facts);
+                                                let av = symbolic::solve_len(&adj, &goal_facts);
+                                                let hv = symbolic::solve_len(&hyp, &goal_facts);
+                                                let vu = v.to_uppercase();
+                                                let reduced = |num: u32, den: u32| -> (u32, u32) {
+                                                    let (mut a, mut b) = (num, den);
+                                                    while b != 0 { let t = a % b; a = b; b = t; }
+                                                    let g = if a == 0 { 1 } else { a };
+                                                    (num / g, den / g)
+                                                };
+                                                let show = |trig: &str, ns: &str, ds: &str, nv: u32, dv: u32| {
+                                                    let (fn_, fd) = reduced(nv, dv);
+                                                    let rad = match trig {
+                                                        "sin" => (nv as f64 / dv as f64).asin(),
+                                                        "cos" => (nv as f64 / dv as f64).acos(),
+                                                        _ => (nv as f64 / dv as f64).atan(),
+                                                    };
+                                                    let deg = rad * 180.0 / std::f64::consts::PI;
+                                                    println!(
+                                                        "// {}({})={}/{}={}/{} -> {}=arc{}({}/{})={:.2}",
+                                                        trig, vu, ns, ds, fn_, fd,
+                                                        vu, trig, fn_, fd, deg
+                                                    );
+                                                };
+                                                if want_trig == "cos" {
+                                                    if let (Some(a), Some(h)) = (av, hv) {
+                                                        show("cos", &seg(v, r), &seg(v, w), a, h);
+                                                        chained = true;
                                                     }
-                                                    let g = if n == 0 { 1 } else { n };
-                                                    let (fn_, fd) = (o / g, a / g);
-                                                    let deg_tan =
-                                                        (o as f64 / a as f64).atan() * 180.0
-                                                            / std::f64::consts::PI;
-                                    println!(
-                                        "// tan({})={}/{}={}/{} -> {}=arctan({}/{})={:.2}",
-                                        angle_ref.to_uppercase(),
-                                        opp.to_uppercase(),
-                                        adj.to_uppercase(),
-                                        fn_,
-                                        fd,
-                                        angle_ref.to_uppercase(),
-                                        fn_,
-                                        fd,
-                                        deg_tan
-                                    );
-                                                    chained = true;
+                                                } else if want_trig == "sin" {
+                                                    if let (Some(o), Some(h)) = (ov, hv) {
+                                                        show("sin", &seg(r, w), &seg(v, w), o, h);
+                                                        chained = true;
+                                                    }
+                                                } else {
+                                                    if let (Some(o), Some(a)) = (ov, av) {
+                                                        show("tan", &seg(r, w), &seg(v, r), o, a);
+                                                        chained = true;
+                                                    }
                                                 }
                                             }
                                         }
@@ -431,7 +453,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                         .collect();
                                         if sides.len() == 3 {
                                             println!(
-                                                "// ({}) -> Angle({})={:.2} [law-of-cosines]",
+                                                "({}) -> Angle({})={:.2} [law-of-cosines]",
                                                 sides.join(" && "),
                                                 angle_ref.to_uppercase(),
                                                 deg
@@ -445,6 +467,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                         "// Calc(Angle({})) = ? (cannot be determined)",
                                         angle_ref.to_uppercase()
                                     );
+                                    println!("Nothing");
                                     any_unproven = true;
                                 }
                             }
@@ -463,10 +486,10 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                         if numeric_ok {
                             let premises = symbolic::sum_premises(lhs, rhs, &facts);
                             if premises.is_empty() {
-                                println!("// {}", display);
+                                println!("{}", display);
                             } else {
                                 println!(
-                                    "// ({}) -> {}",
+                                    "({}) -> {}",
                                     premises.join(" && "),
                                     display
                                 );
@@ -488,7 +511,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                 lhs, rhs, &args[0], apex,
                                             );
                                             for s in &steps {
-                                                println!("// {}", s);
+                                                println!("{}", s);
                                             }
                                             shown = true;
                                             break;
@@ -505,6 +528,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                             "// {}  (cannot be proven)",
                             checker::render_expr(claim)
                         );
+                        println!("Nothing");
                         any_unproven = true;
                     }
                     continue;
@@ -531,6 +555,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                         }
                         None => {
                             println!("// {}  (cannot be proven)", display);
+                            println!("Nothing");
                             goal_failed = true;
                         }
                     }
