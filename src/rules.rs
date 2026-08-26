@@ -1555,6 +1555,26 @@ pub fn rule_base() -> Vec<Rule> {
                 Value::Bool(true),
             ),
         },
+        // Thales' circle theorem: the vertices of a right triangle are
+        // concyclic (the hypotenuse is a diameter of the circumcircle).
+        Rule {
+            id: "right-angle-concyclic",
+            antecedents: vec![PClaim::PredVal(
+                "isright".into(),
+                vec![PExpr::Tri3("A".into(), "B".into(), "C".into())],
+                Value::Bool(true),
+            )],
+            requires: vec![PClaim::PredAt(
+                "rightat".into(),
+                vec![PExpr::Tri3("A".into(), "B".into(), "C".into())],
+                PExpr::PtVar("A".into()),
+            )],
+            consequent: PClaim::OnSameCircle(vec![
+                PExpr::PtVar("A".into()),
+                PExpr::PtVar("B".into()),
+                PExpr::PtVar("C".into()),
+            ]),
+        },
     ]
 }
 

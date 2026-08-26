@@ -196,6 +196,11 @@ impl Claim {
         )
     }
 
+    /// Build a concyclicity claim over already-normalized point names.
+    pub fn on_same_circle(points: &[String]) -> Claim {
+        Claim::OnSameCircle(points.to_vec())
+    }
+
     /// Build a segment-equality claim from raw refs. The two sides are
     /// stored in canonical (sorted) order so `WX=WY` and `WY=WX` denote the
     /// identical claim.

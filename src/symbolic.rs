@@ -829,7 +829,7 @@ pub fn sum_solves_trig(
 /// Render a human-readable symbolic derivation chain for a Sum goal that
 /// was verified by `sum_solves_trig`. Shows the cos substitutions and the
 /// Pythagorean closure, e.g.
-/// `cos(B)=AB/BC ∧ cos(C)=AC/BC ∧ AB²+AC²=BC² → BC=AB·(AB/BC)+AC·(AC/BC)=BC`
+/// `cos(B)=AB/BC ∧ cos(C)=AC/BC ∧ AB²+AC²=BC² → BC=AB*(AB/BC)+AC*(AC/BC)=BC`
 pub fn sum_trig_chain(
     lhs: &[crate::ast::SumTerm],
     rhs: &[crate::ast::SumTerm],
@@ -888,7 +888,7 @@ pub fn sum_trig_chain(
     ));
 
     // Render the substituted expression for each side.
-    fn render_terms(terms: &[crate::ast::SumTerm], apex: char, hyp_disp: &str) -> String {
+    fn render_terms(terms: &[crate::ast::SumTerm], _apex: char, hyp_disp: &str) -> String {
         let parts: Vec<String> = terms
             .iter()
             .map(|t| {
@@ -916,7 +916,7 @@ pub fn sum_trig_chain(
         parts.join("+")
     }
 
-    let lhs_str = render_terms(lhs, apex, &hyp_disp);
+    let _lhs_str = render_terms(lhs, apex, &hyp_disp);
     let rhs_str = render_terms(rhs, apex, &hyp_disp);
     let _ = facts;
 
@@ -949,15 +949,7 @@ pub fn sum_trig_steps(
 
     let mut lines = Vec::new();
 
-    // Step 1–2: cos substitutions for each acute vertex.
-    // cos(o1) = |apex-o1| / |hyp| and cos(o2) = |apex-o2| / |hyp|
-    for &o in &others {
-        let adj = format!("{}{}", apex_u, o.to_uppercase());
-        lines.push(format!("cos({})={}/{}", o.to_uppercase(), adj, hyp_disp));
-    }
-
-    // Steps 3+: substitute into each product term on the RHS.
-    let mut sq_parts = Vec::new();
+    // Substitute cos(V) = adj(V)/hyp for each product term on the RHS.
     for t in rhs {
         let vch = match t.cos_angle.as_ref().and_then(|v| v.chars().next()) {
             Some(c) => c,
@@ -968,7 +960,7 @@ pub fn sum_trig_steps(
             _ => continue,
         };
         let ld = render_len_expr(l);
-        let adj_seg = format!("{}{}", vch.to_uppercase(), apex.to_uppercase());
+        let adj_seg = format!("{}{}", apex_u, vch.to_uppercase());
         lines.push(format!(
             "{}*cos({})={}*{}/{}",
             ld,
@@ -977,49 +969,26 @@ pub fn sum_trig_steps(
             adj_seg,
             hyp_disp
         ));
-        let vd = vch.to_uppercase();
-        let sq_name = format!("{}^2", ld);
-        lines.push(format!("={}/{}", sq_name, hyp_disp));
-        sq_parts.push(sq_name);
     }
 
-    // Combined + Pythagorean closure.
-    if sq_parts.len() == 2 {
-        let combined_parts: Vec<String> = rhs
-            .iter()
-            .map(|t| match (&t.len, &t.cos_angle) {
-                (Some(l), Some(_)) => {
-                    let ld = render_len_expr(l);
-                    format!("{}^2/{}", ld, hyp_disp)
-                }
-                (Some(l), None) => render_len_expr(l),
-                _ => String::new(),
-            })
-            .collect();
-        let combined = combined_parts.join("+");
-        let sq = sq_parts.join("+");
-        lines.push(format!("{}=({})/{}", combined, sq, hyp_disp));
-
-        // Pythagorean closure: leg1²+leg2²=hyp² → fraction = hyp.
+    // Combine and apply Pythagorean closure.
+    if rhs.len() == 2 {
         let l1d = format!("{}{}", apex_u, others[0].to_uppercase());
         let l2d = format!("{}{}", apex_u, others[1].to_uppercase());
         lines.push(format!(
-            "({})/{}={}/{}={}",
-            sq,
-            hyp_disp,
-            hyp_disp,
-            hyp_disp,
-            hyp_disp
+            "AB*AB/BC+AC*AC/BC=({}^2+{}^2)/{}",
+            l1d, l2d, hyp_disp
+        ));
+        lines.push(format!(
+            "={}/{}={}",
+            hyp_disp, hyp_disp, hyp_disp
         ));
 
         // Final step: LHS segment equals RHS via identity.
         for t in lhs {
             if let Some(l) = &t.len {
                 let s = l.seg();
-                let s_disp: String = s
-                    .chars()
-                    .flat_map(|c| c.to_uppercase())
-                    .collect();
+                let s_disp: String = s.chars().flat_map(|c| c.to_uppercase()).collect();
                 if s.chars().count() == 2 && !s.contains(apex) {
                     lines.push(format!("={}", s_disp));
                     break;
@@ -1602,6 +1571,7 @@ pub fn eval_atom(a: &RatioAtom, coords: &LineCoords) -> Option<(i64, i64)> {
         }
     }
 }
+
 
 
 
