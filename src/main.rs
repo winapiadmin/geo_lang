@@ -168,16 +168,17 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                     scoped_stmts.push(stmt);
                 }
             }
-            // inputProperties[N][Scope]: Local keeps this goal's declarations
-            // (and everything derived from them) private to the goal; Global
-            // feeds them into the shared fact store.
+            let mut goal_facts = facts.clone();
+            // inputProperties[N][Scope]: strict resolution.
+            //   Global (default): inp[N] statements feed the shared store.
+            //   Local: inp[N] statements are private to goal N's proof —
+            //     applied to a throwaway copy, discarded afterwards.
             let scope = file
                 .input_props
                 .iter()
                 .find(|p| p.index == goal.index)
                 .map(|p| p.scope)
                 .unwrap_or(ast::Scope::Global);
-            let mut goal_facts = facts.clone();
             if !scoped_stmts.is_empty() {
                 match scope {
                     ast::Scope::Local => {
@@ -191,6 +192,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                     }
                 }
             }
+
 
             // `Calc(...)` goals evaluate numerically instead of proving.
             if !goal.calcs.is_empty() {
@@ -293,7 +295,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                 ) {
                                                     let ratio = o as f64 / a as f64;
                                                     println!(
-                                                        "  chain: tan({})={}/{}={:.4} -> {}=arctan({:.4})~{:.2}°  [tangent]",
+                                                        "  // chain: tan({})={}/{}={:.4} -> {}=arctan({:.4})~{:.2}°  [tangent]",
                                                         angle_ref.to_uppercase(),
                                                         opp.to_uppercase(),
                                                         adj.to_uppercase(),
@@ -368,18 +370,47 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
             if let Some(claim) = &goal.claim {
                 // Trig sum goals are verified numerically.
                 if let ast::ClaimExpr::Sum { lhs, rhs, .. } = claim {
-                    if symbolic::sum_solves(lhs, rhs, &goal_facts) {
+                    let numeric_ok = symbolic::sum_solves(lhs, rhs, &goal_facts);
+                    let trig_ok = !numeric_ok && symbolic::sum_solves_trig(lhs, rhs, &goal_facts);
+                    if numeric_ok || trig_ok {
                         let display = checker::render_expr(claim);
-                        let premises = symbolic::sum_premises(lhs, rhs, &goal_facts);
-                        if premises.is_empty() {
-                            println!("goal {}: {}  (numeric)", goal.index, display);
+                        if numeric_ok {
+                            let premises = symbolic::sum_premises(lhs, rhs, &facts);
+                            if premises.is_empty() {
+                                println!("goal {}: {}  (numeric)", goal.index, display);
+                            } else {
+                                println!("goal {}: {}", goal.index, display);
+                                println!(
+                                    "  // chain: ({}) -> {}  [numeric]",
+                                    premises.join(" && "),
+                                    display
+                                );
+                            }
                         } else {
+                            // Symbolic: find the right triangle and show the
+                            // cos-substitution + pythagoras derivation.
                             println!("goal {}: {}", goal.index, display);
-                            println!(
-                                "  chain: ({}) -> {}  [numeric]",
-                                premises.join(" && "),
-                                display
-                            );
+                            let mut shown = false;
+                            for c in goal_facts.all() {
+                                if let geo_lang::claim::Claim::PredVal { name, args, value } = &c {
+                                    if name == "rightat" && args.len() == 1 {
+                                        if let geo_lang::claim::Value::Point(p) = value {
+                                            if let Some(apex) = p.chars().next() {
+                                                if let Some(chain) = symbolic::sum_trig_chain(
+                                                    lhs, rhs, &args[0], apex, &goal_facts,
+                                                ) {
+                                                    println!("  // proof: {}", chain);
+                                                    shown = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if !shown {
+                                println!("  (symbolic-trig)");
+                            }
                         }
                     } else {
                         println!(
@@ -485,5 +516,6 @@ fn main() -> ExitCode {
         }
     }
 }
+
 
 

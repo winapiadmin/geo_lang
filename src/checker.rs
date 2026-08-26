@@ -1429,7 +1429,7 @@ fn check_goals(file: &File, facts: &FactStore, diags: &mut Vec<Diagnostic>) {
     }
 }
 
-fn render_len_expr(e: &LenExpr) -> String {
+pub fn render_len_expr(e: &LenExpr) -> String {
     match e {
         LenExpr::Seg(r) => r.to_uppercase(),
         LenExpr::Distance(a, b) => {

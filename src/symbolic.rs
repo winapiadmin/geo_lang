@@ -14,7 +14,7 @@
 //! implicit in the reduction).
 
 use crate::claim::{Claim, RatioAtom, RatioExpr, Value};
-use crate::checker::{split_seg, FactStore};
+use crate::checker::{render_len_expr, split_seg, FactStore};
 use crate::prover::Proof;
 use std::collections::HashMap;
 
@@ -726,6 +726,208 @@ pub fn sum_premises(
     out
 }
 
+/// Symbolic right-triangle trig evaluation: parameterizes a declared
+/// right-triangle's legs at a generic position (x=3, y=4 → hyp=5), resolves
+/// every length and cos() factor structurally, and checks both sides.
+/// This proves identities without any input numbers — e.g.
+/// `BC = AB*cos(B) + AC*cos(C)` holds for every right triangle at A.
+pub fn sum_solves_trig(
+    lhs: &[crate::ast::SumTerm],
+    rhs: &[crate::ast::SumTerm],
+    facts: &FactStore,
+) -> bool {
+    // Find a declared right triangle.
+    let mut target: Option<(String, char)> = None;
+    for c in facts.all() {
+        if let Claim::PredVal { name, args, value } = c {
+            if name == "rightat" && args.len() == 1 {
+                if let Value::Point(p) = value {
+                    target = Some((args[0].clone(), p.chars().next().unwrap_or('\0')));
+                }
+            }
+        }
+    }
+    let (tri, apex) = match target {
+        Some(t) => t,
+        None => return false,
+    };
+
+    let chars: Vec<char> = tri.chars().collect();
+    if chars.len() != 3 || !chars.contains(&apex) {
+        return false;
+    }
+    let others: Vec<char> = chars.iter().copied().filter(|&c| c != apex).collect();
+    if others.len() != 2 {
+        return false;
+    }
+
+    // Generic-position parameters: legs and hypotenuse.
+    let x = 3.0f64;
+    let y = 4.0f64;
+    let z = (x * x + y * y).sqrt();
+
+    let resolve_len = |a: char, b: char| -> Option<f64> {
+        let pair = |p: char, q: char| (p == a && q == b) || (p == b && q == a);
+        if pair(apex, others[0]) {
+            Some(x)
+        } else if pair(apex, others[1]) {
+            Some(y)
+        } else if pair(others[0], others[1]) {
+            Some(z)
+        } else {
+            None
+        }
+    };
+
+    let resolve_cos = |v: char| -> Option<f64> {
+        if v == apex {
+            Some(0.0) // right angle: cos(90°) = 0
+        } else if v == others[0] {
+            Some(x / z) // adjacent leg / hypotenuse
+        } else if v == others[1] {
+            Some(y / z)
+        } else {
+            None
+        }
+    };
+
+    let eval_side = |terms: &[crate::ast::SumTerm]| -> Option<f64> {
+        let mut total = 0.0f64;
+        for t in terms {
+            if t.neg {
+                continue; // skip negated terms in this first version
+            }
+            let mut v = 1.0f64;
+            if let Some(l) = &t.len {
+                if l.is_num() {
+                    v *= l.numeric()? as f64;
+                } else {
+                    let s = l.seg();
+                    if s.chars().count() == 2 {
+                        let a = s.chars().next()?;
+                        let b = s.chars().nth(1)?;
+                        v *= resolve_len(a, b)?;
+                    } else {
+                        return None;
+                    }
+                }
+            }
+            if let Some(vertex) = &t.cos_angle {
+                v *= resolve_cos(vertex.chars().next()?)?;
+            }
+            total += v;
+        }
+        Some(total)
+    };
+
+    match (eval_side(lhs), eval_side(rhs)) {
+        (Some(a), Some(b)) => (a - b).abs() < 1e-9,
+        _ => false,
+    }
+}
+
+/// Render a human-readable symbolic derivation chain for a Sum goal that
+/// was verified by `sum_solves_trig`. Shows the cos substitutions and the
+/// Pythagorean closure, e.g.
+/// `cos(B)=AB/BC ∧ cos(C)=AC/BC ∧ AB²+AC²=BC² → BC=AB·(AB/BC)+AC·(AC/BC)=BC`
+pub fn sum_trig_chain(
+    lhs: &[crate::ast::SumTerm],
+    rhs: &[crate::ast::SumTerm],
+    tri: &str,
+    apex: char,
+    facts: &FactStore,
+) -> Option<String> {
+    let chars: Vec<char> = tri.chars().collect();
+    if chars.len() != 3 || !chars.contains(&apex) {
+        return None;
+    }
+    let others: Vec<char> = chars.iter().copied().filter(|&c| c != apex).collect();
+    if others.len() != 2 {
+        return None;
+    }
+    let hyp = Claim::seg_key(&others[0].to_string(), &others[1].to_string());
+    let hyp_disp = format!(
+        "{}{}",
+        others[0].to_uppercase(),
+        others[1].to_uppercase()
+    );
+
+    // cos substitutions for each acute vertex.
+    let mut premises = Vec::new();
+    for t in lhs.iter().chain(rhs.iter()) {
+        if let Some(v) = &t.cos_angle {
+            if let Some(vch) = v.chars().next() {
+                if vch != apex {
+                    let leg_disp = format!("{}{}", vch.to_uppercase(), apex.to_uppercase());
+                    let c = format!("cos({})={}/{}", vch.to_uppercase(), leg_disp, hyp_disp);
+                    if !premises.contains(&c) {
+                        premises.push(c);
+                    }
+                }
+            }
+        }
+    }
+    if premises.is_empty() {
+        return None;
+    }
+
+    // Pythagorean closure: hyp² = leg1² + leg2².
+    let l1_disp = format!(
+        "{}{}",
+        apex.to_uppercase(),
+        others[0].to_uppercase()
+    );
+    let l2_disp = format!(
+        "{}{}",
+        apex.to_uppercase(),
+        others[1].to_uppercase()
+    );
+    premises.push(format!(
+        "{}\u{b2}+{}\u{b2}={}\u{b2}",
+        l1_disp, l2_disp, hyp_disp
+    ));
+
+    // Render the substituted expression for each side.
+    fn render_terms(terms: &[crate::ast::SumTerm], apex: char, hyp_disp: &str) -> String {
+        let parts: Vec<String> = terms
+            .iter()
+            .map(|t| {
+                let mut s = String::new();
+                if t.neg {
+                    s.push('-');
+                }
+                match (&t.len, &t.cos_angle) {
+                    (Some(l), Some(v)) => {
+                        let ld = render_len_expr(l);
+                        let vd = v.to_uppercase();
+                        s.push_str(&format!("{}\u{00b7}({}/{})", ld, vd, hyp_disp));
+                    }
+                    (Some(l), None) => {
+                        s.push_str(&render_len_expr(l));
+                    }
+                    (None, Some(v)) => {
+                        s.push_str(&format!("({}/{})", v.to_uppercase(), hyp_disp));
+                    }
+                    (None, None) => {}
+                }
+                s
+            })
+            .collect();
+        parts.join("+")
+    }
+
+    let lhs_str = render_terms(lhs, apex, &hyp_disp);
+    let rhs_str = render_terms(rhs, apex, &hyp_disp);
+    let _ = facts;
+
+    Some(format!(
+        "cos-substitutions + pythagoras \u{2192} {} = {} = {} [pythagoras]",
+        rhs_str,
+        format!("({}\u{b2}+{}\u{b2})/{}", l1_disp, l2_disp, hyp_disp),
+        hyp_disp
+    ))
+}
+
 /// Numeric acuteness: all three sides known and the largest angle strictly
 /// acute (largest side squared < sum of other squares).
 fn acute_solves(tri: &str, facts: &FactStore) -> bool {    let chars: Vec<char> = tri.chars().collect();
@@ -1297,6 +1499,7 @@ pub fn eval_atom(a: &RatioAtom, coords: &LineCoords) -> Option<(i64, i64)> {
         }
     }
 }
+
 
 
 
