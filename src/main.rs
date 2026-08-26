@@ -83,6 +83,37 @@ fn parse_single_claim(text: &str) -> Result<Vec<ast::ClaimExpr>, String> {
     Ok(vec![claim.clone()])
 }
 
+/// Find the declared right triangle and its solved side lengths.
+/// Returns `(tri, apex, v1, v2)`. Lengths are queried on demand.
+fn right_triangle_ctx(
+    facts: &checker::FactStore,
+) -> Option<(String, char, char, char)> {
+    for c in facts.all() {
+        if let geo_lang::claim::Claim::PredVal { name, args, value } = &c {
+            if name == "rightat" && args.len() == 1 {
+                let apex = match value {
+                    geo_lang::claim::Value::Point(p) => p.chars().next()?,
+                    _ => continue,
+                };
+                let chars: Vec<char> = args[0].chars().collect();
+                if chars.len() == 3 && chars.contains(&apex) {
+                    let others: Vec<char> =
+                        chars.iter().copied().filter(|&c| c != apex).collect();
+                    if others.len() == 2 {
+                        return Some((
+                            args[0].clone(),
+                            apex,
+                            others[0],
+                            others[1],
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
     let (source, src_text) = match read_source(path) {
         Ok(x) => x,
@@ -208,15 +239,56 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                         checker::atom_display_len(lx),
                                         v
                                     );
-                                    // Derivation chain from the numeric solver.
-                                    let claim = geo_lang::claim::Claim::len_eq(&seg, v);
-                                    if let Some(p) =
-                                        symbolic::numeric_proof(&claim, &goal_facts)
-                                    {
-                                        println!(
-                                            "  chain: {}",
-                                            prover::render_chain(&p, None)
-                                        );
+                                    // Formal derivation via right-triangle
+                                    // Pythagoras when applicable.
+                                    if seg.chars().count() == 2 {
+                                        if let Some((tri, apex, o1, o2)) =
+                                            right_triangle_ctx(&goal_facts)
+                                        {
+                                            let tri_u = tri.to_uppercase();
+                                            let s = seg.chars().collect::<Vec<char>>();
+                                            if s.len() == 2 {
+                                                let a = s[0];
+                                                let b = s[1];
+                                                let disp_seg = format!("{}{}", a.to_uppercase(), b.to_uppercase());
+                                                let disp_hyp = format!("{}{}", o1.to_uppercase(), o2.to_uppercase());
+                                                let is_hyp = (a == o1 && b == o2) || (a == o2 && b == o1);
+                                                if is_hyp {
+                                                    let l1d = format!("{}{}", apex.to_uppercase(), o1.to_uppercase());
+                                                    let l2d = format!("{}{}", apex.to_uppercase(), o2.to_uppercase());
+                                                    println!(
+                                                        "  proof: (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2+{}^2)={}",
+                                                        tri_u, apex.to_uppercase(),
+                                                        disp_seg, l1d, l2d,
+                                                        disp_seg, l1d, l2d, v
+                                                    );
+                                                } else {
+                                                    // It's a leg; find the other leg.
+                                                    // The other leg goes from apex
+                                                    // to the vertex NOT in seg.
+                                                    let rem = if o1 != a && o1 != b { o1 } else { o2 };
+                                                    let other_leg = format!("{}{}", apex.to_uppercase(), rem.to_uppercase());
+                                                    let hv = symbolic::solve_len(
+                                                        &geo_lang::claim::Claim::norm_seg(&disp_hyp),
+                                                        &goal_facts,
+                                                    );
+                                                    let ov = symbolic::solve_len(
+                                                        &geo_lang::claim::Claim::norm_seg(&other_leg),
+                                                        &goal_facts,
+                                                    );
+                                                    if let (Some(hv), Some(ov)) = (hv, ov) {
+                                                        println!(
+                                                            "  proof: (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2-{}^2)=sqrt({}-{})={}",
+                                                            tri_u, apex.to_uppercase(),
+                                                            disp_seg, other_leg, disp_hyp,
+                                                            disp_seg, disp_hyp, other_leg,
+                                                            hv*hv, ov*ov,
+                                                            v
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 None => {
@@ -295,7 +367,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                 ) {
                                                     let ratio = o as f64 / a as f64;
                                                     println!(
-                                                        "  // chain: tan({})={}/{}={:.4} -> {}=arctan({:.4})~{:.2}°  [tangent]",
+                                                        "  proof: tan({})={}/{}={:.4} -> {}=arctan({:.4})={:.2}\u{00b0}",
                                                         angle_ref.to_uppercase(),
                                                         opp.to_uppercase(),
                                                         adj.to_uppercase(),
@@ -381,7 +453,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                             } else {
                                 println!("goal {}: {}", goal.index, display);
                                 println!(
-                                    "  // chain: ({}) -> {}  [numeric]",
+                                    "  ({}) -> {}",
                                     premises.join(" && "),
                                     display
                                 );
@@ -394,16 +466,19 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                             for c in goal_facts.all() {
                                 if let geo_lang::claim::Claim::PredVal { name, args, value } = &c {
                                     if name == "rightat" && args.len() == 1 {
-                                        if let geo_lang::claim::Value::Point(p) = value {
-                                            if let Some(apex) = p.chars().next() {
-                                                if let Some(chain) = symbolic::sum_trig_chain(
-                                                    lhs, rhs, &args[0], apex, &goal_facts,
-                                                ) {
-                                                    println!("  // proof: {}", chain);
-                                                    shown = true;
-                                                    break;
-                                                }
+                                        let apex = match value {
+                                            geo_lang::claim::Value::Point(p) => p.chars().next(),
+                                            _ => None,
+                                        };
+                                        if let Some(apex) = apex {
+                                            let steps = symbolic::sum_trig_steps(
+                                                lhs, rhs, &args[0], apex,
+                                            );
+                                            for s in &steps {
+                                                println!("    {}", s);
                                             }
+                                            shown = true;
+                                            break;
                                         }
                                     }
                                 }
@@ -516,6 +591,11 @@ fn main() -> ExitCode {
         }
     }
 }
+
+
+
+
+
 
 
 

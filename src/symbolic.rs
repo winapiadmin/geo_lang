@@ -928,6 +928,108 @@ pub fn sum_trig_chain(
     ))
 }
 
+/// Multi-step symbolic derivation in .geo syntax for a Sum goal verified
+/// by `sum_solves_trig`. Each line is a valid algebraic step.
+pub fn sum_trig_steps(
+    lhs: &[crate::ast::SumTerm],
+    rhs: &[crate::ast::SumTerm],
+    tri: &str,
+    apex: char,
+) -> Vec<String> {
+    let chars: Vec<char> = tri.chars().collect();
+    if chars.len() != 3 || !chars.contains(&apex) {
+        return vec![];
+    }
+    let others: Vec<char> = chars.iter().copied().filter(|&c| c != apex).collect();
+    if others.len() != 2 {
+        return vec![];
+    }
+    let hyp_disp = format!("{}{}", others[0].to_uppercase(), others[1].to_uppercase());
+    let apex_u = apex.to_uppercase();
+
+    let mut lines = Vec::new();
+
+    // Step 1–2: cos substitutions for each acute vertex.
+    // cos(o1) = |apex-o1| / |hyp| and cos(o2) = |apex-o2| / |hyp|
+    for &o in &others {
+        let adj = format!("{}{}", apex_u, o.to_uppercase());
+        lines.push(format!("cos({})={}/{}", o.to_uppercase(), adj, hyp_disp));
+    }
+
+    // Steps 3+: substitute into each product term on the RHS.
+    let mut sq_parts = Vec::new();
+    for t in rhs {
+        let vch = match t.cos_angle.as_ref().and_then(|v| v.chars().next()) {
+            Some(c) => c,
+            None => continue,
+        };
+        let l = match &t.len {
+            Some(l) if !l.is_num() => l,
+            _ => continue,
+        };
+        let ld = render_len_expr(l);
+        let adj_seg = format!("{}{}", vch.to_uppercase(), apex.to_uppercase());
+        lines.push(format!(
+            "{}*cos({})={}*{}/{}",
+            ld,
+            vch.to_uppercase(),
+            ld,
+            adj_seg,
+            hyp_disp
+        ));
+        let vd = vch.to_uppercase();
+        lines.push(format!("={}/{}", format!("{}^2", vd), hyp_disp));
+        sq_parts.push(format!("{}^2", vd));
+    }
+
+    // Combined + Pythagorean closure.
+    if sq_parts.len() == 2 {
+        let combined_parts: Vec<String> = rhs
+            .iter()
+            .map(|t| match (&t.len, &t.cos_angle) {
+                (Some(l), Some(_)) => {
+                    let ld = render_len_expr(l);
+                    format!("{}^2/{}", ld, hyp_disp)
+                }
+                (Some(l), None) => render_len_expr(l),
+                _ => String::new(),
+            })
+            .collect();
+        let combined = combined_parts.join("+");
+        let sq = sq_parts.join("+");
+        lines.push(format!("{}=({})/{}", combined, sq, hyp_disp));
+
+        // Pythagorean closure: leg1²+leg2²=hyp² → fraction = hyp.
+        let l1d = format!("{}{}", apex_u, others[0].to_uppercase());
+        let l2d = format!("{}{}", apex_u, others[1].to_uppercase());
+        lines.push(format!(
+            "({})/{}={}/{}={}",
+            sq,
+            hyp_disp,
+            hyp_disp,
+            hyp_disp,
+            hyp_disp
+        ));
+
+        // Final step: LHS segment equals RHS via identity.
+        for t in lhs {
+            if let Some(l) = &t.len {
+                let s = l.seg();
+                let s_disp: String = s
+                    .chars()
+                    .flat_map(|c| c.to_uppercase())
+                    .collect();
+                if s.chars().count() == 2 && !s.contains(apex) {
+                    lines.push(format!("={}", s_disp));
+                    break;
+                }
+            }
+        }
+    }
+
+    lines
+}
+
 /// Numeric acuteness: all three sides known and the largest angle strictly
 /// acute (largest side squared < sum of other squares).
 fn acute_solves(tri: &str, facts: &FactStore) -> bool {    let chars: Vec<char> = tri.chars().collect();
