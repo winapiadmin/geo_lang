@@ -191,6 +191,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
             ExitCode::SUCCESS
         }
     } else {
+        let mut last_proof_idx: Option<u32> = None;
         for goal in &file.goals {
             // Apply this goal's scoped inputs (`inp[N]:` sections).
             let mut scoped_stmts: Vec<&geo_lang::ast::InputStmt> = Vec::new();
@@ -200,6 +201,10 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                 }
             }
             let mut goal_facts = facts.clone();
+            if last_proof_idx != Some(goal.index) {
+                println!("proof[{}]:", goal.index);
+                last_proof_idx = Some(goal.index);
+            }
             // inputProperties[N][Scope]: strict resolution.
             //   Global (default): inp[N] statements feed the shared store.
             //   Local: inp[N] statements are private to goal N's proof —
@@ -234,8 +239,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                             match symbolic::solve_len(&seg, &goal_facts) {
                                 Some(v) => {
                                     println!(
-                                        "goal {}: Calc({}) = {}",
-                                        goal.index,
+                                        "// Calc({}) = {}",
                                         checker::atom_display_len(lx),
                                         v
                                     );
@@ -257,7 +261,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                     let l1d = format!("{}{}", apex.to_uppercase(), o1.to_uppercase());
                                                     let l2d = format!("{}{}", apex.to_uppercase(), o2.to_uppercase());
                                                     println!(
-                                                        "  proof: (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2+{}^2)={}",
+                                                        "// (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2+{}^2)={}",
                                                         tri_u, apex.to_uppercase(),
                                                         disp_seg, l1d, l2d,
                                                         disp_seg, l1d, l2d, v
@@ -278,7 +282,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                     );
                                                     if let (Some(hv), Some(ov)) = (hv, ov) {
                                                         println!(
-                                                            "  // (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2-{}^2)=sqrt({}-{})={}",
+                                                            "// (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2-{}^2)=sqrt({}-{})={}",
                                                             tri_u, apex.to_uppercase(),
                                                             disp_seg, other_leg, disp_hyp,
                                                             disp_seg, disp_hyp, other_leg,
@@ -293,8 +297,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                 }
                                 None => {
                                     println!(
-                                        "goal {}: Calc({}) = ? (length not determined)",
-                                        goal.index,
+                                        "// Calc({}) = ? (length not determined)",
                                         checker::atom_display_len(lx)
                                     );
                                     any_unproven = true;
@@ -311,8 +314,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                             {
                                 Some(deg) => {
                                     println!(
-                                        "goal {}: Calc(Angle({})) = {:.2}°",
-                                        goal.index,
+                                        "// Calc(Angle({})) = {:.2}",
                                         angle_ref.to_uppercase(),
                                         deg
                                     );
@@ -377,18 +379,18 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                     let deg_tan =
                                                         (o as f64 / a as f64).atan() * 180.0
                                                             / std::f64::consts::PI;
-                                                    println!(
-                                                        "  // tan({})={}/{}={}/{} -> {}=arctan({}/{})={:.2}\u{00b0}",
-                                                        angle_ref.to_uppercase(),
-                                                        opp.to_uppercase(),
-                                                        adj.to_uppercase(),
-                                                        fn_,
-                                                        fd,
-                                                        angle_ref.to_uppercase(),
-                                                        fn_,
-                                                        fd,
-                                                        deg_tan
-                                                    );
+                                    println!(
+                                        "// tan({})={}/{}={}/{} -> {}=arctan({}/{})={:.2}",
+                                        angle_ref.to_uppercase(),
+                                        opp.to_uppercase(),
+                                        adj.to_uppercase(),
+                                        fn_,
+                                        fd,
+                                        angle_ref.to_uppercase(),
+                                        fn_,
+                                        fd,
+                                        deg_tan
+                                    );
                                                     chained = true;
                                                 }
                                             }
@@ -429,7 +431,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                         .collect();
                                         if sides.len() == 3 {
                                             println!(
-                                                "  chain: ({}) -> Angle({})={:.2}°  [law-of-cosines]",
+                                                "// ({}) -> Angle({})={:.2} [law-of-cosines]",
                                                 sides.join(" && "),
                                                 angle_ref.to_uppercase(),
                                                 deg
@@ -440,8 +442,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                 }
                                 None => {
                                     println!(
-                                        "goal {}: Calc(Angle({})) = ? (cannot be determined)",
-                                        goal.index,
+                                        "// Calc(Angle({})) = ? (cannot be determined)",
                                         angle_ref.to_uppercase()
                                     );
                                     any_unproven = true;
@@ -462,11 +463,10 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                         if numeric_ok {
                             let premises = symbolic::sum_premises(lhs, rhs, &facts);
                             if premises.is_empty() {
-                                println!("goal {}: {}  (numeric)", goal.index, display);
+                                println!("// {}", display);
                             } else {
-                                println!("goal {}: {}", goal.index, display);
                                 println!(
-                                    "  ({}) -> {}",
+                                    "// ({}) -> {}",
                                     premises.join(" && "),
                                     display
                                 );
@@ -474,7 +474,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                         } else {
                             // Symbolic: find the right triangle and show the
                             // cos-substitution + pythagoras derivation.
-                            println!("goal {}: {}", goal.index, display);
+                            println!("// {}", display);
                             let mut shown = false;
                             for c in goal_facts.all() {
                                 if let geo_lang::claim::Claim::PredVal { name, args, value } = &c {
@@ -488,7 +488,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                 lhs, rhs, &args[0], apex,
                                             );
                                             for s in &steps {
-                                                println!("    // {}", s);
+                                                println!("// {}", s);
                                             }
                                             shown = true;
                                             break;
@@ -497,13 +497,12 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                 }
                             }
                             if !shown {
-                                println!("  (symbolic-trig)");
+                                println!("// (symbolic-trig)");
                             }
                         }
                     } else {
                         println!(
-                            "goal {}: {}  (cannot be proven)",
-                            goal.index,
+                            "// {}  (cannot be proven)",
                             checker::render_expr(claim)
                         );
                         any_unproven = true;
@@ -512,38 +511,26 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                 }
                 let atoms = checker::claim_atoms(claim);
                 if atoms.is_empty() {
-                    println!("goal {}: invalid claim", goal.index);
+                    println!("// invalid claim");
                     continue;
                 }
                 let displays = checker::atom_display_strings(claim);
-                let multi = atoms.len() > 1;
                 let mut goal_failed = false;
-                for (i, (g, display)) in atoms.iter().zip(displays.iter()).enumerate() {
-                    let label = if multi {
-                        format!("goal {} atom {}", goal.index, i + 1)
-                    } else {
-                        format!("goal {}", goal.index)
-                    };
+                for (g, display) in atoms.iter().zip(displays.iter()) {
                     if facts.contains(g) {
-                        println!("{}: {}  (already established)", label, display);
+                        println!("{}", display);
                         continue;
                     }
                     match prover::prove_seeded(g, &goal_facts, &saturated, &rules) {
                         Some(p) => {
-                            println!("{}: {}", label, display);
-                            println!("  chain: {}", prover::render_chain(&p, Some(display)));
-                            let mut tree = prover::render_tree(&p, 2, Some(display));
-                            if tree.ends_with('\n') {
-                                tree.pop();
-                            }
-                            println!("  {}", tree.replace("\n", "\n  "));
+                            println!("{}", prover::render_chain(&p, Some(display)));
                             // Make the goal's claim available to later goals so
                             // they can reuse it instead of re-deriving it.
                             facts.add(g.clone(), checker::Origin::Proof(goal.index, 0));
                             saturated.add(g.clone(), checker::Origin::Proof(goal.index, 0));
                         }
                         None => {
-                            println!("{}: {}  (cannot be proven)", label, display);
+                            println!("// {}  (cannot be proven)", display);
                             goal_failed = true;
                         }
                     }
