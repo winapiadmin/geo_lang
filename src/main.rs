@@ -278,7 +278,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                     );
                                                     if let (Some(hv), Some(ov)) = (hv, ov) {
                                                         println!(
-                                                            "  proof: (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2-{}^2)=sqrt({}-{})={}",
+                                                            "  // (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2-{}^2)=sqrt({}-{})={}",
                                                             tri_u, apex.to_uppercase(),
                                                             disp_seg, other_leg, disp_hyp,
                                                             disp_seg, disp_hyp, other_leg,
@@ -378,7 +378,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                         (o as f64 / a as f64).atan() * 180.0
                                                             / std::f64::consts::PI;
                                                     println!(
-                                                        "  proof: tan({})={}/{}={}/{} -> {}=arctan({}/{})={:.2}\u{00b0}",
+                                                        "  // tan({})={}/{}={}/{} -> {}=arctan({}/{})={:.2}\u{00b0}",
                                                         angle_ref.to_uppercase(),
                                                         opp.to_uppercase(),
                                                         adj.to_uppercase(),
@@ -488,7 +488,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                 lhs, rhs, &args[0], apex,
                                             );
                                             for s in &steps {
-                                                println!("    {}", s);
+                                                println!("    // {}", s);
                                             }
                                             shown = true;
                                             break;
@@ -604,6 +604,7 @@ fn main() -> ExitCode {
         }
     }
 }
+
 
 
 
