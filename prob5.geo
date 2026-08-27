@@ -9,7 +9,6 @@ prove:
 inp[1]:
 BC=5
 AC=4
-inputProperties[1][Scope]=Local
 inp[4]:
 E=Intersection(AB,PerpendicularLine(H,AB))
 I=Midpoint(BE)

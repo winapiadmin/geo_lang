@@ -261,7 +261,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                     let l1d = format!("{}{}", apex.to_uppercase(), o1.to_uppercase());
                                                     let l2d = format!("{}{}", apex.to_uppercase(), o2.to_uppercase());
                                                     println!(
-                                                        "(RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2+{}^2)={}",
+                                                        "// (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2+{}^2)={}",
                                                         tri_u, apex.to_uppercase(),
                                                         disp_seg, l1d, l2d,
                                                         disp_seg, l1d, l2d, v
@@ -282,7 +282,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                     );
                                                     if let (Some(hv), Some(ov)) = (hv, ov) {
                                                         println!(
-                                                            "(RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2-{}^2)=sqrt({}-{})={}",
+                                                            "// (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2-{}^2)=sqrt({}-{})={}",
                                                             tri_u, apex.to_uppercase(),
                                                             disp_seg, other_leg, disp_hyp,
                                                             disp_seg, disp_hyp, other_leg,
@@ -486,10 +486,10 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                         if numeric_ok {
                             let premises = symbolic::sum_premises(lhs, rhs, &facts);
                             if premises.is_empty() {
-                                println!("{}", display);
+                                println!("// {}", display);
                             } else {
                                 println!(
-                                    "({}) -> {}",
+                                    "// ({}) -> {}",
                                     premises.join(" && "),
                                     display
                                 );
