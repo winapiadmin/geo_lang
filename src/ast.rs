@@ -15,11 +15,13 @@ pub struct Pos {
 pub enum LenExpr {
     Seg(String),
     Distance(String, String),
-    /// A numeric literal, e.g. the `7` in `Distance(A,H)=7` or `AD=3`.
     Num(u32),
-    /// A squared length expression, e.g. the `Distance(B,D)^2` in
-    /// `Distance(B,D)^2=32`.
     Sq(Box<LenExpr>),
+    Sqrt(Box<LenExpr>),
+    Add(Box<LenExpr>, Box<LenExpr>),
+    Sub(Box<LenExpr>, Box<LenExpr>),
+    Mul(Box<LenExpr>, Box<LenExpr>),
+    Trig(String, String),
 }
 
 impl LenExpr {
@@ -31,6 +33,11 @@ impl LenExpr {
             LenExpr::Distance(a, b) => format!("{}{}", a, b),
             LenExpr::Num(_) => String::new(),
             LenExpr::Sq(inner) => inner.seg(),
+            LenExpr::Sqrt(inner) => inner.seg(),
+            LenExpr::Add(l, _) => l.seg(),
+            LenExpr::Sub(l, _) => l.seg(),
+            LenExpr::Mul(l, _) => l.seg(),
+            LenExpr::Trig(func, angle) => format!("{}({})", func, angle),
         }
     }
 
@@ -38,6 +45,10 @@ impl LenExpr {
         match self {
             LenExpr::Num(_) => true,
             LenExpr::Sq(inner) => inner.is_num(),
+            LenExpr::Sqrt(inner) => inner.is_num(),
+            LenExpr::Add(l, r) => l.is_num() && r.is_num(),
+            LenExpr::Sub(l, r) => l.is_num() && r.is_num(),
+            LenExpr::Mul(l, r) => l.is_num() && r.is_num(),
             _ => false,
         }
     }
@@ -51,6 +62,18 @@ impl LenExpr {
         match self {
             LenExpr::Num(n) => Some(*n),
             LenExpr::Sq(inner) => inner.numeric().and_then(|n| n.checked_mul(n)),
+            LenExpr::Sqrt(inner) => inner.numeric().and_then(|n| {
+                let sq = (n as f64).sqrt();
+                let rounded = sq.round() as u32;
+                if (sq - rounded as f64).abs() < 1e-9 {
+                    Some(rounded)
+                } else {
+                    None
+                }
+            }),
+            LenExpr::Add(l, r) => Some(l.numeric()? + r.numeric()?),
+            LenExpr::Sub(l, r) => l.numeric()?.checked_sub(r.numeric()?),
+            LenExpr::Mul(l, r) => l.numeric()?.checked_mul(r.numeric()?),
             _ => None,
         }
     }

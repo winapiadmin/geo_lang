@@ -261,7 +261,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                     let l1d = format!("{}{}", apex.to_uppercase(), o1.to_uppercase());
                                                     let l2d = format!("{}{}", apex.to_uppercase(), o2.to_uppercase());
                                                     println!(
-                                                        "// (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2+{}^2)={}",
+                                                        "(RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2+{}^2)={}",
                                                         tri_u, apex.to_uppercase(),
                                                         disp_seg, l1d, l2d,
                                                         disp_seg, l1d, l2d, v
@@ -282,7 +282,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                     );
                                                     if let (Some(hv), Some(ov)) = (hv, ov) {
                                                         println!(
-                                                            "// (RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2-{}^2)=sqrt({}-{})={}",
+                                                            "(RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2-{}^2)=sqrt({}-{})={}",
                                                             tri_u, apex.to_uppercase(),
                                                             disp_seg, other_leg, disp_hyp,
                                                             disp_seg, disp_hyp, other_leg,
@@ -393,6 +393,12 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                                                         _ => (nv as f64 / dv as f64).atan(),
                                                     };
                                                     let deg = rad * 180.0 / std::f64::consts::PI;
+                                                    // Valid .geo: ratio equality
+                                                    println!(
+                                                        "{}/{}={}/{}",
+                                                        ns, ds, fn_, fd
+                                                    );
+                                                    // Trig explanation as comment
                                                     println!(
                                                         "// {}({})={}/{}={}/{} -> {}=arc{}({}/{})={:.2}",
                                                         trig, vu, ns, ds, fn_, fd,
@@ -486,10 +492,10 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                         if numeric_ok {
                             let premises = symbolic::sum_premises(lhs, rhs, &facts);
                             if premises.is_empty() {
-                                println!("// {}", display);
+                                println!("{}", display);
                             } else {
                                 println!(
-                                    "// ({}) -> {}",
+                                    "({}) -> {}",
                                     premises.join(" && "),
                                     display
                                 );
@@ -532,6 +538,43 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                         any_unproven = true;
                     }
                     continue;
+                }
+                // EqChain goals with compound expressions (law of cosines etc.)
+                if let ast::ClaimExpr::EqChain { items, .. } = claim {
+                    if let Some(deriv) = symbolic::law_of_cosines_derive(items, &goal_facts) {
+                        for d in &deriv {
+                            println!("{}", d);
+                        }
+                        println!("{}", checker::render_expr(claim));
+                        continue;
+                    }
+                    // Rectangle diagonal identity: AE²+BE²+CE²+DE²=AB²+BC².
+                    if let Some(deriv) = symbolic::rectangle_diagonal_derive(items, &goal_facts) {
+                        for d in &deriv {
+                            println!("{}", d);
+                        }
+                        println!("{}", checker::render_expr(claim));
+                        continue;
+                    }
+                    // Numeric evaluation: compute both sides and check equality.
+                    if items.len() >= 2 {
+                        let vals: Vec<Option<f64>> = items
+                            .iter()
+                            .map(|e| symbolic::eval_len_expr(e, &goal_facts))
+                            .collect();
+                        if vals.iter().all(|v| v.is_some()) {
+                            let v0 = vals[0].unwrap();
+                            if vals[1..].iter().all(|v| (v.unwrap() - v0).abs() < 1e-9) {
+                                // Show the evaluation result.
+                                let parts: Vec<String> = items
+                                    .iter()
+                                    .map(|e| checker::render_len_expr(e))
+                                    .collect();
+                                println!("{}", parts.join("="));
+                                continue;
+                            }
+                        }
+                    }
                 }
                 let atoms = checker::claim_atoms(claim);
                 if atoms.is_empty() {

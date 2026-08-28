@@ -110,6 +110,9 @@ impl Parser {
         // `inp[N]:` header index: statements that follow are scoped to goal N.
         let mut scoped: Option<u32> = None;
         let mut in_proof: Option<ProofBlock> = None;
+        // The 1-based index of the most recently parsed goal. Segmented
+        // `prove:` blocks must keep numbering strictly consecutive.
+        let mut last_goal_idx: Option<u32> = None;
 
         for line in lines {
             if line.toks.is_empty() {
@@ -128,7 +131,7 @@ impl Parser {
                     // Optional [N] before the colon.
                     if line.toks.len() >= 5
                         && matches!(line.toks[1].kind, TokKind::Symbol('['))
-                        && matches!(line.toks[2].kind, TokKind::Number(n))
+                        && matches!(line.toks[2].kind, TokKind::Number(_n))
                         && matches!(line.toks[3].kind, TokKind::Symbol(']'))
                         && matches!(line.toks[4].kind, TokKind::Symbol(':'))
                     {
@@ -199,6 +202,22 @@ impl Parser {
                             file.proofs.push(p);
                         }
                         let goal = self.parse_goal(&line)?;
+                        // Segmented goals must be numbered strictly monotonic:
+                        // each goal's index is the previous + 1, so consecutive
+                        // `prove:` blocks continue the numbering rather than
+                        // restarting, duplicating, or reordering it.
+                        let expected = last_goal_idx.map(|i| i + 1).unwrap_or(1);
+                        if goal.index != expected {
+                            return self.err(
+                                pos_of(&line.toks[0]),
+                                &format!(
+                                    "goal numbers must be strictly consecutive; expected `{}.` after goal {}",
+                                    expected,
+                                    last_goal_idx.map(|i| i.to_string()).unwrap_or_default()
+                                ),
+                            );
+                        }
+                        last_goal_idx = Some(goal.index);
                         file.goals.push(goal);
                         continue;
                     }
@@ -991,9 +1010,17 @@ impl Parser {
         *k += 1;
 
         // Linear trig form: `BC = AB*cos(B) + AC*cos(C)` (a `*` or `cos`
-        // appears on the right-hand side).
+        // appears on the right-hand side of `=`).
         if *k < toks.len() && is_symbol(&toks[*k], '=') {
-            let rest_is_trig = toks[*k + 1..].windows(2).any(|w| {
+            // Only scan up to the next `->` arrow so that downstream chain
+            // segments (e.g. `-> AE^2+BE^2+CE^2+DE^2=4*AE^2`) don't trigger
+            // the trig heuristic for the current segment.
+            let arrow_pos = toks[*k + 1..]
+                .iter()
+                .position(|t| t.kind == TokKind::Arrow)
+                .map(|p| *k + 1 + p)
+                .unwrap_or(toks.len());
+            let rest_is_trig = toks[*k + 1..arrow_pos].windows(2).any(|w| {
                 matches!(&w[0].kind, TokKind::Ident(id) if id.eq_ignore_ascii_case("cos"))
                     || is_symbol(&w[0], '*')
                     || is_symbol(&w[1], '*')
@@ -1046,7 +1073,9 @@ impl Parser {
                 expect_symbol(toks, k, ',')?;
                 let b = expect_ident(toks, k)?.to_lowercase();
                 expect_symbol(toks, k, ')')?;
-                let mut items = vec![self.parse_sq_suffix(toks, k, LenExpr::Distance(a, b))?];
+                let base = self.parse_sq_suffix(toks, k, LenExpr::Distance(a, b))?;
+                let first = self.parse_len_binop(toks, k, base)?;
+                let mut items = vec![first];
                 self.parse_eq_chain_rest(toks, k, &mut items)?;
                 return Ok(ClaimExpr::EqChain { items, pos });
             }
@@ -1127,7 +1156,9 @@ impl Parser {
         }
 
         // chained length equality: lhs = rhs = ...
-        let mut items = vec![self.parse_sq_suffix(toks, k, LenExpr::Seg(name))?];
+        let base = self.parse_sq_suffix(toks, k, LenExpr::Seg(name))?;
+        let first = self.parse_len_binop(toks, k, base)?;
+        let mut items = vec![first];
         self.parse_eq_chain_rest(toks, k, &mut items)?;
         // A two-term equality of three-character references denotes triangle
         // equality, e.g. `ABC = MNP`.
@@ -1155,7 +1186,7 @@ impl Parser {
     ) -> Result<(), ParseError> {
         expect_symbol(toks, k, '=')?;
         loop {
-            items.push(self.parse_len_expr(toks, k)?);
+            items.push(self.parse_len_compound(toks, k)?);
             if *k < toks.len() && is_symbol(&toks[*k], '=') {
                 *k += 1;
                 continue;
@@ -1208,25 +1239,106 @@ impl Parser {
             TokKind::Ident(_) => {
                 let name = expect_ident(toks, k)?.to_lowercase();
                 if *k < toks.len() && is_symbol(&toks[*k], '(') {
-                    if name != "distance" {
+                    if name == "distance" {
+                        *k += 1;
+                        let a = expect_ident(toks, k)?.to_lowercase();
+                        expect_symbol(toks, k, ',')?;
+                        let b = expect_ident(toks, k)?.to_lowercase();
+                        expect_symbol(toks, k, ')')?;
+                        LenExpr::Distance(a, b)
+                    } else if name == "sqrt" {
+                        *k += 1;
+                        let inner = self.parse_len_compound(toks, k)?;
+                        expect_symbol(toks, k, ')')?;
+                        LenExpr::Sqrt(Box::new(inner))
+                    } else if name == "cos" || name == "sin" || name == "tan"
+                        || name == "arccos" || name == "arcsin" || name == "arctan"
+                    {
+                        *k += 1;
+                        let arg = expect_ident(toks, k)?.to_lowercase();
+                        expect_symbol(toks, k, ')')?;
+                        LenExpr::Trig(name, arg)
+                    } else {
                         return self.err(
                             pos,
-                            "only `Distance` may be used as a length expression call",
+                            &format!("`{}` is not a supported length expression function", name),
                         );
                     }
-                    *k += 1;
-                    let a = expect_ident(toks, k)?.to_lowercase();
-                    expect_symbol(toks, k, ',')?;
-                    let b = expect_ident(toks, k)?.to_lowercase();
-                    expect_symbol(toks, k, ')')?;
-                    LenExpr::Distance(a, b)
                 } else {
                     LenExpr::Seg(name)
                 }
             }
+            TokKind::Symbol('(') => {
+                *k += 1;
+                let inner = self.parse_len_compound(toks, k)?;
+                expect_symbol(toks, k, ')')?;
+                inner
+            }
             _ => return self.err(pos, "expected a length expression"),
         };
-        self.parse_sq_suffix(toks, k, base)
+        let base = self.parse_sq_suffix(toks, k, base)?;
+        Ok(base)
+    }
+
+    /// Parse a compound length expression: a primary followed by optional
+    /// `+`, `-`, `*` chains.  Used for EqChain items and inside
+    /// `sqrt()` / parenthesised sub-expressions.
+    fn parse_len_compound(
+        &self,
+        toks: &[Token],
+        k: &mut usize,
+    ) -> Result<LenExpr, ParseError> {
+        let left = self.parse_len_expr(toks, k)?;
+        let left = self.parse_len_mul(toks, k, left)?;
+        self.parse_len_binop(toks, k, left)
+    }
+
+    /// Parse optional `+`, `-` after a length expression.
+    fn parse_len_binop(
+        &self,
+        toks: &[Token],
+        k: &mut usize,
+        left: LenExpr,
+    ) -> Result<LenExpr, ParseError> {
+        if *k >= toks.len() {
+            return Ok(left);
+        }
+        match &toks[*k].kind {
+            TokKind::Symbol('+') | TokKind::Symbol('-') => {
+                let op = toks[*k].kind.clone();
+                *k += 1;
+                let primary = self.parse_len_expr(toks, k)?;
+                let right = self.parse_len_mul(toks, k, primary)?;
+                let node = match op {
+                    TokKind::Symbol('+') => LenExpr::Add(Box::new(left), Box::new(right)),
+                    TokKind::Symbol('-') => LenExpr::Sub(Box::new(left), Box::new(right)),
+                    _ => unreachable!(),
+                };
+                self.parse_len_binop(toks, k, node)
+            }
+            _ => Ok(left),
+        }
+    }
+
+    /// Parse optional `*` chains after a length expression (higher precedence
+    /// than `+`/`-`).
+    fn parse_len_mul(
+        &self,
+        toks: &[Token],
+        k: &mut usize,
+        left: LenExpr,
+    ) -> Result<LenExpr, ParseError> {
+        if *k >= toks.len() {
+            return Ok(left);
+        }
+        if let TokKind::Symbol('*') = &toks[*k].kind {
+            *k += 1;
+            let right = self.parse_len_expr(toks, k)?;
+            let node = LenExpr::Mul(Box::new(left), Box::new(right));
+            self.parse_len_mul(toks, k, node)
+        } else {
+            Ok(left)
+        }
     }
 
     /// Parse a ratio atom: a segment reference or an integer constant.

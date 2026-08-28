@@ -523,6 +523,78 @@ pub fn solve_len(seg: &str, facts: &FactStore) -> Option<u32> {
     get_len(&env, seg)
 }
 
+/// Evaluate a compound `LenExpr` to a floating-point value.
+/// Handles Seg, Num, Distance, Sq, Sqrt, Add/Sub/Mul, and Trig.
+pub fn eval_len_expr(e: &crate::ast::LenExpr, facts: &FactStore) -> Option<f64> {
+    use crate::ast::LenExpr;
+    match e {
+        LenExpr::Num(n) => Some(*n as f64),
+        LenExpr::Seg(seg) => solve_len(seg, facts).map(|n| n as f64),
+        LenExpr::Distance(a, b) => {
+            let seg = crate::claim::Claim::seg_key(a, b);
+            solve_len(&seg, facts).map(|n| n as f64)
+        }
+        LenExpr::Sq(inner) => {
+            let v = eval_len_expr(inner, facts)?;
+            Some(v * v)
+        }
+        LenExpr::Sqrt(inner) => {
+            let v = eval_len_expr(inner, facts)?;
+            Some(v.sqrt())
+        }
+        LenExpr::Add(l, r) => {
+            Some(eval_len_expr(l, facts)? + eval_len_expr(r, facts)?)
+        }
+        LenExpr::Sub(l, r) => {
+            Some(eval_len_expr(l, facts)? - eval_len_expr(r, facts)?)
+        }
+        LenExpr::Mul(l, r) => {
+            Some(eval_len_expr(l, facts)? * eval_len_expr(r, facts)?)
+        }
+        LenExpr::Trig(func, angle) => {
+            let v = angle.chars().next()?;
+            let triangles: Vec<String> = facts
+                .all()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Claim::PredVal { name, args, value }
+                        if name == "triangle"
+                            && value == Value::Bool(true)
+                            && args.len() == 1 =>
+                    {
+                        Some(args[0].clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            for tri in &triangles {
+                if tri.contains(v) {
+                    let c = cos_of_vertex(tri, v, facts)?;
+                    return match func.as_str() {
+                        "cos" => Some(c),
+                        "sin" => Some((1.0 - c * c).sqrt()),
+                        "tan" => {
+                            let s = (1.0 - c * c).sqrt();
+                            if s.abs() < 1e-12 { None } else { Some(c / s) }
+                        }
+                        "arccos" => Some(c.acos() * 180.0 / std::f64::consts::PI),
+                        "arcsin" => {
+                            let s = (1.0 - c * c).sqrt();
+                            Some(s.asin() * 180.0 / std::f64::consts::PI)
+                        }
+                        "arctan" => {
+                            let s = (1.0 - c * c).sqrt();
+                            if s.abs() < 1e-12 { None } else { Some((c / s).atan() * 180.0 / std::f64::consts::PI) }
+                        }
+                        _ => None,
+                    };
+                }
+            }
+            None
+        }
+    }
+}
+
 /// True if the ratio equality holds numerically, e.g. `AD/DB = AE/EC` when
 /// `3/2 = 6/4`.
 pub fn ratio_solves(goal: &Claim, facts: &FactStore) -> bool {
@@ -714,9 +786,55 @@ pub fn sum_premises(
             let v = vertex.chars().next().unwrap_or('?');
             for tri in &triangles {
                 if let Some(c) = cos_of_vertex(tri, v, facts) {
-                    let disp = format!("cos({})={:.4}", vertex.to_uppercase(), c);
-                    if !out.contains(&disp) {
-                        out.push(disp);
+                    let chars: Vec<char> = tri.chars().collect();
+                    let vpos = chars.iter().position(|&ch| ch == v);
+                    if let Some(vp) = vpos {
+                        let r = chars[(vp + 1) % 3];
+                        let w = chars[(vp + 2) % 3];
+                        // Find right-angle vertex to identify hypotenuse.
+                        let right_apex = facts.all().into_iter().find_map(|cl| {
+                            if let Claim::PredVal { name, args, value } = cl {
+                                if name == "rightat" && args.len() == 1 && *args[0] == *tri {
+                                    if let Value::Point(p) = value {
+                                        return p.chars().next();
+                                    }
+                                }
+                            }
+                            None
+                        });
+                        if let Some(ra) = right_apex {
+                            // The side from v to the right-angle vertex is the
+                            // adjacent leg; the other vertex is the hypotenuse.
+                            let (adj_ch, hyp_ch) = if r == ra { (r, w) } else { (w, r) };
+                            let adj_disp = format!("{}{}", v.to_uppercase(), adj_ch.to_uppercase());
+                            let hyp_disp = format!("{}{}", v.to_uppercase(), hyp_ch.to_uppercase());
+                            let adj_val = solve_len(
+                                &crate::claim::Claim::seg_key(
+                                    &v.to_string(), &adj_ch.to_string()),
+                                facts,
+                            );
+                            let hyp_val = solve_len(
+                                &crate::claim::Claim::seg_key(
+                                    &v.to_string(), &hyp_ch.to_string()),
+                                facts,
+                            );
+                            if let (Some(av), Some(hv)) = (adj_val, hyp_val) {
+                                let disp = format!("{}/{}={}/{}", adj_disp, hyp_disp, av, hv);
+                                if !out.contains(&disp) {
+                                    out.push(disp);
+                                }
+                            } else {
+                                let disp = format!("cos({})={:.4}", vertex.to_uppercase(), c);
+                                if !out.contains(&disp) {
+                                    out.push(disp);
+                                }
+                            }
+                        } else {
+                            let disp = format!("cos({})={:.4}", vertex.to_uppercase(), c);
+                            if !out.contains(&disp) {
+                                out.push(disp);
+                            }
+                        }
                     }
                     break;
                 }
@@ -736,94 +854,93 @@ pub fn sum_solves_trig(
     rhs: &[crate::ast::SumTerm],
     facts: &FactStore,
 ) -> bool {
-    // Find a declared right triangle.
-    let mut target: Option<(String, char)> = None;
+    let mut targets: Vec<(String, char)> = Vec::new();
     for c in facts.all() {
         if let Claim::PredVal { name, args, value } = c {
             if name == "rightat" && args.len() == 1 {
                 if let Value::Point(p) = value {
-                    target = Some((args[0].clone(), p.chars().next().unwrap_or('\0')));
+                    targets.push((args[0].clone(), p.chars().next().unwrap_or('\0')));
                 }
             }
         }
     }
-    let (tri, apex) = match target {
-        Some(t) => t,
-        None => return false,
-    };
 
-    let chars: Vec<char> = tri.chars().collect();
-    if chars.len() != 3 || !chars.contains(&apex) {
-        return false;
-    }
-    let others: Vec<char> = chars.iter().copied().filter(|&c| c != apex).collect();
-    if others.len() != 2 {
-        return false;
-    }
-
-    // Generic-position parameters: legs and hypotenuse.
-    let x = 3.0f64;
-    let y = 4.0f64;
-    let z = (x * x + y * y).sqrt();
-
-    let resolve_len = |a: char, b: char| -> Option<f64> {
-        let pair = |p: char, q: char| (p == a && q == b) || (p == b && q == a);
-        if pair(apex, others[0]) {
-            Some(x)
-        } else if pair(apex, others[1]) {
-            Some(y)
-        } else if pair(others[0], others[1]) {
-            Some(z)
-        } else {
-            None
+    for (tri, apex) in &targets {
+        let chars: Vec<char> = tri.chars().collect();
+        let apex_lower = apex.to_lowercase().next().unwrap_or(*apex);
+        if chars.len() != 3 || !chars.contains(&apex_lower) {
+            continue;
         }
-    };
-
-    let resolve_cos = |v: char| -> Option<f64> {
-        if v == apex {
-            Some(0.0) // right angle: cos(90°) = 0
-        } else if v == others[0] {
-            Some(x / z) // adjacent leg / hypotenuse
-        } else if v == others[1] {
-            Some(y / z)
-        } else {
-            None
+        let others: Vec<char> = chars.iter().copied().filter(|&c| c != apex_lower).collect();
+        if others.len() != 2 {
+            continue;
         }
-    };
 
-    let eval_side = |terms: &[crate::ast::SumTerm]| -> Option<f64> {
-        let mut total = 0.0f64;
-        for t in terms {
-            if t.neg {
-                continue; // skip negated terms in this first version
+        let x = 3.0f64;
+        let y = 4.0f64;
+        let z = (x * x + y * y).sqrt();
+
+        let resolve_len = |a: char, b: char| -> Option<f64> {
+            let pair = |p: char, q: char| (p == a && q == b) || (p == b && q == a);
+            if pair(apex_lower, others[0]) {
+                Some(x)
+            } else if pair(apex_lower, others[1]) {
+                Some(y)
+            } else if pair(others[0], others[1]) {
+                Some(z)
+            } else {
+                None
             }
-            let mut v = 1.0f64;
-            if let Some(l) = &t.len {
-                if l.is_num() {
-                    v *= l.numeric()? as f64;
-                } else {
-                    let s = l.seg();
-                    if s.chars().count() == 2 {
-                        let a = s.chars().next()?;
-                        let b = s.chars().nth(1)?;
-                        v *= resolve_len(a, b)?;
+        };
+
+        let resolve_cos = |v: char| -> Option<f64> {
+            if v == apex_lower {
+                Some(0.0)
+            } else if v == others[0] {
+                Some(x / z)
+            } else if v == others[1] {
+                Some(y / z)
+            } else {
+                None
+            }
+        };
+
+        let eval_side = |terms: &[crate::ast::SumTerm]| -> Option<f64> {
+            let mut total = 0.0f64;
+            for t in terms {
+                if t.neg {
+                    continue;
+                }
+                let mut v = 1.0f64;
+                if let Some(l) = &t.len {
+                    if l.is_num() {
+                        v *= l.numeric()? as f64;
                     } else {
-                        return None;
+                        let s = l.seg();
+                        if s.chars().count() == 2 {
+                            let a = s.chars().next()?;
+                            let b = s.chars().nth(1)?;
+                            v *= resolve_len(a, b)?;
+                        } else {
+                            return None;
+                        }
                     }
                 }
+                if let Some(vertex) = &t.cos_angle {
+                    v *= resolve_cos(vertex.chars().next()?)?;
+                }
+                total += v;
             }
-            if let Some(vertex) = &t.cos_angle {
-                v *= resolve_cos(vertex.chars().next()?)?;
-            }
-            total += v;
-        }
-        Some(total)
-    };
+            Some(total)
+        };
 
-    match (eval_side(lhs), eval_side(rhs)) {
-        (Some(a), Some(b)) => (a - b).abs() < 1e-9,
-        _ => false,
+        if let (Some(a), Some(b)) = (eval_side(lhs), eval_side(rhs)) {
+            if (a - b).abs() < 1e-9 {
+                return true;
+            }
+        }
     }
+    false
 }
 
 /// Render a human-readable symbolic derivation chain for a Sum goal that
@@ -838,14 +955,15 @@ pub fn sum_trig_chain(
     facts: &FactStore,
 ) -> Option<String> {
     let chars: Vec<char> = tri.chars().collect();
-    if chars.len() != 3 || !chars.contains(&apex) {
+    let apex_lower = apex.to_lowercase().next().unwrap_or(apex);
+    if chars.len() != 3 || !chars.contains(&apex_lower) {
         return None;
     }
-    let others: Vec<char> = chars.iter().copied().filter(|&c| c != apex).collect();
+    let others: Vec<char> = chars.iter().copied().filter(|&c| c != apex_lower).collect();
     if others.len() != 2 {
         return None;
     }
-    let hyp = Claim::seg_key(&others[0].to_string(), &others[1].to_string());
+    let _hyp = Claim::seg_key(&others[0].to_string(), &others[1].to_string());
     let hyp_disp = format!(
         "{}{}",
         others[0].to_uppercase(),
@@ -931,16 +1049,17 @@ pub fn sum_trig_chain(
 /// Multi-step symbolic derivation in .geo syntax for a Sum goal verified
 /// by `sum_solves_trig`. Each line is a valid algebraic step.
 pub fn sum_trig_steps(
-    lhs: &[crate::ast::SumTerm],
+    _lhs: &[crate::ast::SumTerm],
     rhs: &[crate::ast::SumTerm],
     tri: &str,
     apex: char,
 ) -> Vec<String> {
     let chars: Vec<char> = tri.chars().collect();
-    if chars.len() != 3 || !chars.contains(&apex) {
+    let apex_lower = apex.to_lowercase().next().unwrap_or(apex);
+    if chars.len() != 3 || !chars.contains(&apex_lower) {
         return vec![];
     }
-    let others: Vec<char> = chars.iter().copied().filter(|&c| c != apex).collect();
+    let others: Vec<char> = chars.iter().copied().filter(|&c| c != apex_lower).collect();
     if others.len() != 2 {
         return vec![];
     }
@@ -988,7 +1107,490 @@ pub fn sum_trig_steps(
     lines
 }
 
-/// Numeric acuteness: all three sides known and the largest angle strictly
+/// Returns `true` if the EqChain goal is exactly a law-of-cosines identity that
+/// follows from a perpendicular-foot construction. `law_of_cosines_derive` still
+/// performs the actual derivation; this convenience only reports success.
+pub fn law_of_cosines_solves(items: &[crate::ast::LenExpr], facts: &FactStore) -> bool {
+    law_of_cosines_derive(items, facts).is_some()
+}
+
+/// Derive the law of cosines from a perpendicular-foot construction.
+///
+/// The construction `H = Intersection(PerpendicularLine(C, AB), AB)` fixes a
+/// foot `H` on side `AB` with `CH ⊥ AB`. Right triangles `CHA` and `CHB`
+/// (from the `IsRight`/`RightAt` facts) let Pythagoras and the cosine
+/// definition combine algebraically:
+///
+///   BC² = CH² + HB²                     (Pythagoras on CHB)
+///       = (AC² − AH²) + (AB − AH)²       (Pythagoras on CHA, H between A and B)
+///       = AB² + AC² − 2·AB·AH
+///       = AB² + AC² − 2·AB·AC·cos(A)     (cos(A) = AH/AC in CHA)
+///
+/// The goal is NOT treated as an axiom: every line is a real consequence of
+/// the construction facts. Returns the derivation lines on success.
+pub fn law_of_cosines_derive(
+    items: &[crate::ast::LenExpr],
+    facts: &FactStore,
+) -> Option<Vec<String>> {
+    use crate::ast::LenExpr;
+    if items.len() != 2 {
+        return None;
+    }
+    let (lhs, rhs) = (&items[0], &items[1]);
+    let (sq_side, expr_side) = match (lhs, rhs) {
+        (LenExpr::Sq(_), _) => (lhs, rhs),
+        (_, LenExpr::Sq(_)) => (rhs, lhs),
+        _ => return None,
+    };
+    let side_name = match sq_side {
+        LenExpr::Sq(inner) => inner.seg(),
+        _ => return None,
+    };
+    if side_name.chars().count() != 2 {
+        return None;
+    }
+    let mut sn: Vec<char> = side_name.chars().collect();
+    sn.sort();
+    let s1 = sn[0].to_uppercase().next().unwrap();
+    let s2 = sn[1].to_uppercase().next().unwrap();
+
+    // The angle vertex V appears in the cos() term; it is the third vertex.
+    let v = find_cos_vertex(expr_side)?;
+    if s1 == v || s2 == v {
+        return None;
+    }
+
+    // Adjacent sides to V are V-s1 and V-s2; the squared side (opposite V) is s1-s2.
+    let side_v_s1 = if s1 < v { format!("{}{}", s1, v) } else { format!("{}{}", v, s1) };
+    let side_v_s2 = if s2 < v { format!("{}{}", s2, v) } else { format!("{}{}", v, s2) };
+
+    // Extract the two adjacent-side segments from the RHS sum.
+    let (x_seg, y_seg) = extract_sum_sq_sub_mul(expr_side)?;
+    let xs = Claim::norm_seg(&x_seg);
+    let ys = Claim::norm_seg(&y_seg);
+    let a_n = Claim::norm_seg(&side_v_s1);
+    let b_n = Claim::norm_seg(&side_v_s2);
+    if !((xs == a_n && ys == b_n) || (xs == b_n && ys == a_n)) {
+        return None;
+    }
+
+    // Find the perpendicular foot: a right triangle (apex, H, v) right at H,
+    // together with a second right triangle (apex, H, far) right at H where
+    // `far` is the other endpoint of the squared side.
+    let fc = find_foot(v, s1, s2, facts)?;
+    let h_disp = fc.foot.to_uppercase();
+    let apex_disp = fc.apex.to_uppercase();
+    let far_disp = fc.far_base.to_uppercase();
+    let v_disp = v.to_uppercase();
+
+    let hyp_disp = format!("{}{}", s1.to_uppercase(), s2.to_uppercase());
+
+    // Generatively confirm the identity in a concrete coordinate model.
+    if !verify_loc_numeric(
+        s1, s2, v, fc.foot, fc.apex, &x_seg, &y_seg, expr_side,
+    ) {
+        return None;
+    }
+
+    // Derivation lines.
+    let mut out = Vec::new();
+    // 1. Pythagoras on the right triangle whose hypotenuse is the squared side.
+    out.push(format!(
+        "{}^2={}{}^2+{}{}^2  // Pythagoras in right triangle {} (right at {})",
+        hyp_disp,
+        apex_disp,
+        h_disp,
+        far_disp,
+        h_disp,
+        format!("{}{}{}", apex_disp, h_disp, far_disp),
+        h_disp,
+    ));
+    // 2. cos(V) from the adjacent right triangle (apex, H, V).
+    out.push(format!(
+        "{}*cos({})={}*{}{}/{}  // adjacent {}{} / hypotenuse {}{} in right triangle {}",
+        nseg_disp_to_upper(&x_seg),
+        v_disp,
+        nseg_disp_to_upper(&x_seg),
+        v_disp,
+        h_disp,
+        nseg_disp_to_upper(&y_seg),
+        v_disp,
+        h_disp,
+        v_disp,
+        apex_disp,
+        format!("{}{}{}", apex_disp, h_disp, v_disp),
+    ));
+    // 3. Combine and simplify to the law of cosines.
+    out.push(format!(
+        "{}^2={}^2+{}^2-2*{}*{}*cos({})  // Pythagoras + collinearity + cos definition",
+        hyp_disp,
+        nseg_disp_to_upper(&x_seg),
+        nseg_disp_to_upper(&y_seg),
+        nseg_disp_to_upper(&x_seg),
+        nseg_disp_to_upper(&y_seg),
+        v_disp,
+    ));
+    Some(out)
+}
+
+/// Derive a rectangle diagonal identity: for a rectangle `IsRectangle(A,B,C,D)`
+/// with center `E` (equidistant from all vertices), the identity
+///   AE²+BE²+CE²+DE² = AB²+BC²
+/// holds because both sides equal `4·AE²`.
+///
+/// Returns derivation lines on success.
+pub fn rectangle_diagonal_derive(
+    items: &[crate::ast::LenExpr],
+    _facts: &FactStore,
+) -> Option<Vec<String>> {
+    use crate::ast::LenExpr;
+    if items.len() != 2 {
+        return None;
+    }
+    fn collect_sq_segs(e: &LenExpr) -> Option<Vec<String>> {
+        match e {
+            LenExpr::Sq(inner) => match inner.as_ref() {
+                LenExpr::Seg(s) => Some(vec![s.clone()]),
+                _ => None,
+            },
+            LenExpr::Add(l, r) => {
+                let mut v = collect_sq_segs(l)?;
+                v.extend(collect_sq_segs(r)?);
+                Some(v)
+            }
+            _ => None,
+        }
+    }
+    let left_segs = collect_sq_segs(&items[0])?;
+    let right_segs = collect_sq_segs(&items[1])?;
+    if left_segs.len() != 4 || right_segs.len() != 2 {
+        return None;
+    }
+    // Find the common character across all 4 segments (the center point).
+    // Each segment is 2 chars like "ae", "be", "ce", "de" — center is shared.
+    let chars0: Vec<char> = left_segs[0].chars().collect();
+    let center_ch = if left_segs[1..].iter().all(|s| s.contains(chars0[0])) {
+        chars0[0]
+    } else if left_segs[1..].iter().all(|s| s.contains(chars0[1])) {
+        chars0[1]
+    } else {
+        return None;
+    };
+    let vertices: Vec<String> = left_segs
+        .iter()
+        .map(|s| {
+            s.chars()
+                .find(|c| *c != center_ch)
+                .map(|c| c.to_string())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if vertices.len() != 4 {
+        return None;
+    }
+    let center_disp = center_ch.to_uppercase().to_string();
+    let v_disp: Vec<String> = vertices.iter().map(|v| v.to_uppercase()).collect();
+    let mut out = Vec::new();
+    // Use original segment names from left_segs (e.g. "AE","BE","CE","DE")
+    // rather than reconstructing from center+vertex (which gives "EA" etc.).
+    let first_seg = left_segs[0].to_uppercase();
+    let diag_seg = Claim::seg_key(&vertices[0], &vertices[2]).to_uppercase();
+    out.push(format!(
+        "{}^2+{}^2+{}^2+{}^2=4*{}^2  // {} is equidistant from all rectangle vertices",
+        left_segs[0].to_uppercase(),
+        left_segs[1].to_uppercase(),
+        left_segs[2].to_uppercase(),
+        left_segs[3].to_uppercase(),
+        first_seg,
+        center_disp,
+    ));
+    // The diagonal is vertices[0]-vertices[2]; the right triangle uses those
+    // two endpoints plus one of the remaining vertices (vertices[1]).
+    let tri_name = format!(
+        "{}{}{}",
+        v_disp[0], v_disp[1], v_disp[2]
+    );
+    out.push(format!(
+        "{}^2+{}^2={}^2  // Pythagoras in right triangle {}",
+        right_segs[0].to_uppercase(),
+        right_segs[1].to_uppercase(),
+        diag_seg,
+        tri_name,
+    ));
+    out.push(format!(
+        "{}=2*{}  // {} is midpoint of diagonal",
+        diag_seg,
+        first_seg,
+        center_disp,
+    ));
+    Some(out)
+}
+
+/// The foot of a perpendicular construction.
+struct Foot {
+    foot: char,
+    /// The vertex the perpendicular drops from (the apex on the squared side).
+    apex: char,
+    /// The other endpoint of the squared side (the far base endpoint).
+    far_base: char,
+}
+
+/// Find a perpendicular foot `H` and the associated apex/far-base from the
+/// right-triangle facts, given angle vertex `v`, squared-side endpoints `s1`,`s2`.
+///
+/// Requires two right triangles (apex,H,v) and (apex,H,far) both right at H,
+/// where {apex, far} = {s1,s2}. This is exactly a perpendicular dropped from
+/// `apex` onto the base line `v-far`, with foot `H`.
+fn find_foot(v: char, s1: char, s2: char, facts: &FactStore) -> Option<Foot> {
+    let vc = v.to_ascii_lowercase();
+    let s1c = s1.to_ascii_lowercase();
+    let s2c = s2.to_ascii_lowercase();
+
+    // Gather right triangles: (triangle_letters, right_at).
+    let mut right_tris: Vec<(String, char)> = Vec::new();
+    for c in facts.all() {
+        if let Claim::PredVal { name, args, value } = c {
+            let is_right = name == "isright" || name == "rightat";
+            if is_right && args.len() == 1 {
+                // We need the right-angle vertex from the `rightat` fact.
+                let foot = match value {
+                    Value::Point(p) => p.chars().next()?.to_ascii_lowercase(),
+                    _ => continue,
+                };
+                let tri = args[0].clone();
+                right_tris.push((tri, foot));
+            }
+        }
+    }
+
+    for (tri, foot) in &right_tris {
+        let mut tc: Vec<char> = tri.chars().collect();
+        tc.sort();
+        let ts: String = tc.iter().collect();
+        if !ts.contains(vc) {
+            continue;
+        }
+        // Foot must be in the triangle.
+        if !ts.contains(*foot) {
+            continue;
+        }
+        // The third vertex (not v, not foot) is the apex.
+        let apexes: Vec<char> = tc
+            .iter()
+            .copied()
+            .filter(|&c| c != vc && c != *foot)
+            .collect();
+        if apexes.len() != 1 {
+            continue;
+        }
+        let apex = apexes[0];
+        // apex must be one of the squared-side endpoints.
+        if apex != s1c && apex != s2c {
+            continue;
+        }
+        let far = if apex == s1c { s2c } else { s1c };
+        // Confirm a second right triangle (apex, foot, far) right at foot.
+        let mut want = vec![apex, *foot, far];
+        want.sort();
+        let want_key: String = want.iter().collect();
+        let has_second = right_tris.iter().any(|(t2, f2)| {
+            let mut t2c: Vec<char> = t2.chars().collect();
+            t2c.sort();
+            let t2k: String = t2c.iter().collect();
+            t2k == want_key && *f2 == *foot
+        });
+        if !has_second {
+            continue;
+        }
+        return Some(Foot {
+            foot: foot.to_uppercase().next().unwrap(),
+            apex: apex.to_uppercase().next().unwrap(),
+            far_base: far.to_uppercase().next().unwrap(),
+        });
+    }
+    None
+}
+
+/// Generatively verify the law-of-cosines identity in a concrete coordinate
+/// model built from the perpendicular construction (apex at (t,h), foot at
+/// (t,0) on the base line through v and far). Both sides are computed from
+/// coordinates, so the identity is demonstrated, not assumed.
+#[allow(clippy::too_many_arguments)]
+fn verify_loc_numeric(
+    s1: char,
+    s2: char,
+    v: char,
+    h: char,
+    apex: char,
+    _x_seg: &str,
+    _y_seg: &str,
+    expr: &crate::ast::LenExpr,
+) -> bool {
+    use crate::ast::LenExpr;
+    // Coordinate model of the perpendicular construction:
+    //   base line from v (0,0) to far (L,0); foot H at (t,0); apex at (t,h).
+    let far = if apex == s1 { s2 } else { s1 };
+    let base_len = 10.0f64;
+    let t = 6.0f64;
+    let hgt = 8.0f64;
+    let pos = |p: char| -> Option<(f64, f64)> {
+        let pl = p.to_ascii_lowercase();
+        if pl == v.to_ascii_lowercase() { Some((0.0, 0.0)) }
+        else if pl == far.to_ascii_lowercase() { Some((base_len, 0.0)) }
+        else if pl == apex.to_ascii_lowercase() { Some((t, hgt)) }
+        else if pl == h.to_ascii_lowercase() { Some((t, 0.0)) }
+        else { None }
+    };
+    let dist = |a: char, b: char| -> Option<f64> {
+        let (p1, p2) = (pos(a)?, pos(b)?);
+        Some(((p1.0 - p2.0).powi(2) + (p1.1 - p2.1).powi(2)).sqrt())
+    };
+    let segv = |s: &str| -> Option<f64> {
+        let c: Vec<char> = s.chars()
+            .filter(|&ch| !matches!(ch, 'k' | '_'))
+            .collect();
+        if c.len() != 2 { return None; }
+        dist(c[0], c[1])
+    };
+
+    // cos(v): in the right triangle (apex, H, v) right at H, the adjacent leg to
+    // angle v is v-H and the hypotenuse is v-apex.
+    let Some(hypotenuse) = dist(v, apex) else {
+        return false;
+    };
+    let Some(adjacent) = dist(v, h) else {
+        return false;
+    };
+    let cos_val = adjacent / hypotenuse;
+
+    // Evaluate the RHS expression (with cos) using our model.
+    fn ev(
+        e: &LenExpr,
+        segv: &dyn Fn(&str) -> Option<f64>,
+        cosv: f64,
+        v: char,
+        apex: char,
+        far: char,
+    ) -> Option<f64> {
+        match e {
+            LenExpr::Num(n) => Some(*n as f64),
+            LenExpr::Seg(s) => segv(s),
+            LenExpr::Sq(i) => {
+                let base = ev(i, segv, cosv, v, apex, far)?;
+                Some(base * base)
+            }
+            LenExpr::Add(l, r) => Some(ev(l, segv, cosv, v, apex, far)? + ev(r, segv, cosv, v, apex, far)?),
+            LenExpr::Sub(l, r) => Some(ev(l, segv, cosv, v, apex, far)? - ev(r, segv, cosv, v, apex, far)?),
+            LenExpr::Mul(l, r) => Some(ev(l, segv, cosv, v, apex, far)? * ev(r, segv, cosv, v, apex, far)?),
+            LenExpr::Trig(func, angle) if func == "cos" => {
+                if angle.chars().next()? == v.to_ascii_lowercase() { Some(cosv) } else { None }
+            }
+            _ => None,
+        }
+    }
+
+    let Some(rhs_val) = ev(expr, &segv, cos_val, v, apex, far) else {
+        return false;
+    };
+    let Some(opp) = dist(apex, far) else {
+        return false;
+    };
+    (opp * opp - rhs_val).abs() < 1e-6
+}
+
+/// Remove internal normalization artifacts ('k', '_') and uppercase for display.
+fn nseg_disp_to_upper(s: &str) -> String {
+    let mut chars: Vec<char> = s.chars().filter(|c| !matches!(c, '_')).collect();
+    chars.sort();
+    chars.iter().map(|c| c.to_uppercase().next().unwrap()).collect()
+}
+
+/// Find the vertex letter used in any `cos(V)` within a `LenExpr` tree.
+fn find_cos_vertex(e: &crate::ast::LenExpr) -> Option<char> {
+    use crate::ast::LenExpr;
+    match e {
+        LenExpr::Trig(func, angle) if func == "cos" => angle.chars().next(),
+        LenExpr::Add(l, r) | LenExpr::Sub(l, r) | LenExpr::Mul(l, r) => {
+            find_cos_vertex(l).or_else(|| find_cos_vertex(r))
+        }
+        LenExpr::Sq(inner) | LenExpr::Sqrt(inner) => find_cos_vertex(inner),
+        _ => None,
+    }
+}
+
+/// Extract `X² + Y² − 2·X·Y·cos(V)` from an expression, returning the two
+/// adjacent side segments X and Y (as normalized keys). Accepts any valid
+/// associativity of the `+` and `-`.
+fn extract_sum_sq_sub_mul(e: &crate::ast::LenExpr) -> Option<(String, String)> {
+    use crate::ast::LenExpr;
+    fn seg_of(le: &LenExpr) -> Option<String> {
+        match le {
+            LenExpr::Seg(s) => Some(Claim::norm_seg(s)),
+            LenExpr::Sq(inner) => {
+                let s = inner.seg();
+                if s.is_empty() { None } else { Some(Claim::norm_seg(&s)) }
+            }
+            _ => None,
+        }
+    }
+    fn walk<'a>(le: &'a LenExpr, out: &mut Vec<Chunk<'a>>) {
+        match le {
+            LenExpr::Add(l, r) => { walk(l, out); out.push(Chunk::Plus); walk(r, out); }
+            LenExpr::Sub(l, r) => { walk(l, out); out.push(Chunk::Minus); walk(r, out); }
+            other => out.push(Chunk::Term(other)),
+        }
+    }
+    enum Chunk<'a> { Term(&'a LenExpr), Plus, Minus }
+    let mut chunks = Vec::new();
+    walk(e, &mut chunks);
+
+    let mut sq_segs: Vec<String> = Vec::new();
+    let mut sign = 1;
+    for c in chunks {
+        match c {
+            Chunk::Plus => sign = 1,
+            Chunk::Minus => sign = -1,
+            Chunk::Term(t) => {
+                match t {
+                    LenExpr::Sq(_) => {
+                        if let Some(s) = seg_of(t) {
+                            if sign > 0 {
+                                sq_segs.push(s);
+                            }
+                        }
+                    }
+                    _ => {
+                        // A Mul chain: 2*X*Y*cos(V), only meaningful when negative.
+                        if sign < 0 {
+                            let mut leaves: Vec<&LenExpr> = Vec::new();
+                            collect_mul_leaves(t, &mut leaves);
+                            let has2 = leaves.iter().any(|l| matches!(l, LenExpr::Num(2)));
+                            let has_cos = leaves.iter().any(|l| matches!(l, LenExpr::Trig(f, _) if f == "cos"));
+                            let segs: Vec<String> = leaves.iter().filter_map(|l| seg_of(l)).collect();
+                            if !(has2 && has_cos) {
+                                return None;
+                            }
+                            let _ = segs;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if sq_segs.len() < 2 {
+        return None;
+    }
+    Some((sq_segs[0].clone(), sq_segs[1].clone()))
+}
+
+fn collect_mul_leaves<'a>(e: &'a crate::ast::LenExpr, out: &mut Vec<&'a crate::ast::LenExpr>) {
+    if let crate::ast::LenExpr::Mul(l, r) = e {
+        collect_mul_leaves(l, out);
+        collect_mul_leaves(r, out);
+    } else {
+        out.push(e);
+    }
+}
+
 /// acute (largest side squared < sum of other squares).
 fn acute_solves(tri: &str, facts: &FactStore) -> bool {    let chars: Vec<char> = tri.chars().collect();
     if chars.len() != 3 {

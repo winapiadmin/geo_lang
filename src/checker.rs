@@ -113,9 +113,21 @@ pub fn claim_atoms(expr: &ClaimExpr) -> Vec<Claim> {
 /// True if an equality chain compares a squared length with a plain one,
 /// e.g. `BD^2 = CE`, which is a unit mismatch.
 fn eq_chain_mixed(items: &[LenExpr]) -> bool {
+    // Only flag truly mixed chains where one side is a plain segment and
+    // the other is a bare `^2` — compound expressions (Add/Sub/Mul/Sqrt/Trig)
+    // may evaluate to squared lengths (e.g. law of cosines).
+    fn is_plain(e: &LenExpr) -> bool {
+        matches!(e, LenExpr::Seg(_) | LenExpr::Distance(_, _))
+    }
+    fn is_bare_sq(e: &LenExpr) -> bool {
+        match e {
+            LenExpr::Sq(inner) => is_plain(inner.as_ref()),
+            _ => false,
+        }
+    }
     items.windows(2).any(|w| {
         let (l, r) = (&w[0], &w[1]);
-        !l.is_num() && !r.is_num() && l.squared() != r.squared()
+        (is_plain(l) && is_bare_sq(r)) || (is_bare_sq(l) && is_plain(r))
     })
 }
 
@@ -129,6 +141,11 @@ fn len_expr_len(e: &LenExpr) -> usize {
         LenExpr::Distance(a, b) => "Distance".len() + 1 + a.len() + 1 + b.len() + 1,
         LenExpr::Num(n) => n.to_string().len(),
         LenExpr::Sq(inner) => len_expr_len(inner) + 2,
+        LenExpr::Sqrt(inner) => 5 + len_expr_len(inner) + 1,
+        LenExpr::Add(l, r) => len_expr_len(l) + 1 + len_expr_len(r),
+        LenExpr::Sub(l, r) => len_expr_len(l) + 1 + len_expr_len(r),
+        LenExpr::Mul(l, r) => len_expr_len(l) + 1 + len_expr_len(r),
+        LenExpr::Trig(func, angle) => func.len() + 1 + angle.len() + 1,
     }
 }
 
@@ -220,16 +237,30 @@ pub fn build_facts_from_input(file: &File) -> FactStore {
     for stmt in &file.input {
         process_input(stmt, &mut facts, &mut diags, &known, &circles);
     }
-    // Transitive closure for On facts: if X on YZ and Z on AB, then X on AB
-    transitive_on_closure(&mut facts);
-    // Thales: the midpoint of the hypotenuse of a right triangle is
-    // equidistant from all three vertices.
-    derive_right_triangle_circumcenter(&mut facts);
-    // Length-equality closure + circle-membership propagation.
-    seg_eq_closure(&mut facts);
-    circle_membership_closure(&mut facts);
+    derive_global_facts(&mut facts);
     facts
 }
+
+/// Run the global fact-derivation pipeline (transitive closures, geometric
+/// property derivation, segment-equality and circle-membership closures) over
+/// a fact store built from a file's `inp:` section. Shared by the prover and
+/// the checker so both reason over the same derived facts.
+pub fn derive_global_facts(facts: &mut FactStore) {
+    // Transitive closure for On facts: if X on YZ and Z on AB, then X on AB
+    transitive_on_closure(facts);
+    // Thales: the midpoint of the hypotenuse of a right triangle is
+    // equidistant from all three vertices.
+    derive_right_triangle_circumcenter(facts);
+    // In a rectangle the diagonals bisect each other: their intersection
+    // point is the midpoint of both diagonals, the diagonals are equal, so
+    // the midpoint is equidistant from all four vertices (the circumcenter)
+    // and the four vertices are concyclic.
+    derive_rectangle_properties(facts);
+    // Length-equality closure + circle-membership propagation.
+    seg_eq_closure(facts);
+    circle_membership_closure(facts);
+}
+
 
 /// Transitive closure of segment-equality facts via union-find: if AB=CD and
 /// CD=EF are known, materialize AB=EF (bounded per equivalence class).
@@ -470,6 +501,64 @@ fn derive_right_triangle_circumcenter(facts: &mut FactStore) {
     }
 }
 
+/// In a rectangle `IsRectangle(A,B,C,D)` (vertices in order) the diagonals
+/// `AC` and `BD` bisect each other at their intersection. Derive:
+///   * the intersection point `E` is the midpoint of both diagonals,
+///   * the diagonals are equal, so `E` is equidistant from all four vertices,
+///   * the four vertices are concyclic (the rectangle's circumcircle).
+fn derive_rectangle_properties(facts: &mut FactStore) {
+    use crate::claim::Value;
+    let mut rects: Vec<(String, String, String, String)> = Vec::new();
+    for c in facts.all() {
+        if let Claim::PredVal { name, args, value } = c {
+            if name.eq_ignore_ascii_case("rectangle")
+                && args.len() == 4
+                && value == Value::Bool(true)
+            {
+                let pts: Vec<String> = args.iter().map(|p| Claim::norm_ref(p)).collect();
+                rects.push((pts[0].clone(), pts[1].clone(), pts[2].clone(), pts[3].clone()));
+            }
+        }
+    }
+    let mut on_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for c in facts.all() {
+        if let Claim::On(p, s) = c {
+            on_map.entry(s.clone()).or_default().push(p.clone());
+        }
+    }
+    for (a, b, c, d) in rects {
+        let diag1 = Claim::seg_key(&a, &c);
+        let diag2 = Claim::seg_key(&b, &d);
+        let on1 = on_map.get(&diag1).cloned().unwrap_or_default();
+        let on2 = on_map.get(&diag2).cloned().unwrap_or_default();
+        // The diagonal intersection is the single-char point lying on both
+        // diagonals (the shared interior point, not a shared vertex).
+        let e = on1.iter().find(|p| p.chars().count() == 1 && on2.contains(p));
+        if let Some(e) = e {
+            facts.add(
+                Claim::pred("IsMedian", &[e.clone(), diag1.clone()], Value::Bool(true)),
+                Origin::Input,
+            );
+            facts.add(
+                Claim::pred("IsMedian", &[e.clone(), diag2.clone()], Value::Bool(true)),
+                Origin::Input,
+            );
+            facts.add(Claim::seg_eq(&diag1, &diag2), Origin::Input);
+            let ea = Claim::seg_key(e, &a);
+            let eb = Claim::seg_key(e, &b);
+            let ec = Claim::seg_key(e, &c);
+            let ed = Claim::seg_key(e, &d);
+            facts.add(Claim::seg_eq(&ea, &eb), Origin::Input);
+            facts.add(Claim::seg_eq(&ea, &ec), Origin::Input);
+            facts.add(Claim::seg_eq(&ea, &ed), Origin::Input);
+            facts.add(
+                Claim::pred("OnSameCircle", &[a.clone(), b.clone(), c.clone(), d.clone()], Value::Bool(true)),
+                Origin::Input,
+            );
+        }
+    }
+}
+
 /// Compute transitive closure of On facts for midpoint chains only.
 /// If X is on segment YZ, and Z is the midpoint of YW, then X is on YW.
 fn transitive_on_closure(facts: &mut FactStore) {
@@ -589,6 +678,8 @@ pub fn check(file: &File) -> Vec<Diagnostic> {
     for stmt in &file.input {
         process_input(stmt, &mut facts, &mut diags, &known, &circles);
     }
+
+    derive_global_facts(&mut facts);
 
     diags.extend(apply_proofs(file, &mut facts));
 
@@ -1015,6 +1106,42 @@ fn process_construction(
                             Claim::On(Claim::norm_ref(point), Claim::norm_seg(&seg)),
                             Origin::Input,
                         );
+                        // Auto-derive right angles: the perpendicular segment
+                        // creates right triangles at the foot.
+                        let pchars: Vec<char> = point.chars().collect();
+                        let hchars: Vec<char> = n.chars().collect();
+                        if pchars.len() == 1 && hchars.len() == 1 && base.len() == 2 {
+                            let a = base.chars().next().unwrap();
+                            let b = base.chars().nth(1).unwrap();
+                            for x in [a, b] {
+                                let tri = format!(
+                                    "{}{}{}",
+                                    pchars[0].to_lowercase(),
+                                    hchars[0].to_lowercase(),
+                                    x.to_lowercase()
+                                );
+                                facts.add(
+                                    Claim::pred("IsRight", &[tri.clone()], Value::Bool(true)),
+                                    Origin::Input,
+                                );
+                                facts.add(
+                                    Claim::PredVal {
+                                        name: "rightat".into(),
+                                        args: vec![tri.clone()],
+                                        value: Value::Point(n.to_uppercase()),
+                                    },
+                                    Origin::Input,
+                                );
+                                facts.add(
+                                    Claim::PredVal {
+                                        name: "triangle".into(),
+                                        args: vec![tri],
+                                        value: Value::Bool(true),
+                                    },
+                                    Origin::Input,
+                                );
+                            }
+                        }
                     }
                     Geom::Line { a, b, .. } => {
                         // An explicit line: the intersection point lies on it.
@@ -1261,6 +1388,19 @@ fn process_chain(
         let expr = &claims[0];
         let atoms = claim_atoms(expr);
         if atoms.is_empty() {
+            // Sum claims have no atoms — verify numerically.
+            if let ClaimExpr::Sum { lhs, rhs, .. } = expr {
+                if crate::symbolic::sum_solves(lhs, rhs, facts)
+                    || crate::symbolic::sum_solves_trig(lhs, rhs, facts)
+                {
+                    return;
+                }
+                diags.push(Diagnostic::error(
+                    span_of(expr.pos(), expr_len(expr)),
+                    "Sum identity could not be verified",
+                ));
+                return;
+            }
             diags.push(Diagnostic::error(
                 span_of(expr.pos(), expr_len(expr)),
                 "a proof step must conclude at least one claim",
@@ -1302,6 +1442,19 @@ fn process_chain(
         }
         let concl_atoms = claim_atoms(concl);
         if concl_atoms.is_empty() {
+            // Sum claims in chain conclusions — verify numerically.
+            if let ClaimExpr::Sum { lhs, rhs, .. } = concl {
+                if crate::symbolic::sum_solves(lhs, rhs, facts)
+                    || crate::symbolic::sum_solves_trig(lhs, rhs, facts)
+                {
+                    continue;
+                }
+                diags.push(Diagnostic::error(
+                    span_of(concl.pos(), expr_len(concl)),
+                    "Sum identity could not be verified",
+                ));
+                continue;
+            }
             diags.push(Diagnostic::error(
                 span_of(concl.pos(), expr_len(concl)),
                 "a conclusion must contain at least one claim",
@@ -1408,6 +1561,30 @@ fn check_goals(file: &File, facts: &FactStore, diags: &mut Vec<Diagnostic>) {
                     ));
                     continue;
                 }
+                // Evaluate compound EqChain items numerically.
+                if items.len() >= 2 {
+                    let vals: Vec<Option<f64>> = items
+                        .iter()
+                        .map(|e| crate::symbolic::eval_len_expr(e, facts))
+                        .collect();
+                    if vals.iter().all(|v| v.is_some()) {
+                        let v0 = vals[0].unwrap();
+                        if vals[1..].iter().all(|v| (v.unwrap() - v0).abs() < 1e-9) {
+                            continue;
+                        }
+                    }
+                    // Algebraic law-of-cosines verification.
+                    if crate::symbolic::law_of_cosines_solves(items, facts) {
+                        continue;
+                    }
+                }
+            }
+            if let ClaimExpr::Sum { lhs, rhs, .. } = claim {
+                if crate::symbolic::sum_solves(lhs, rhs, facts)
+                    || crate::symbolic::sum_solves_trig(lhs, rhs, facts)
+                {
+                    continue;
+                }
             }
             let atoms = claim_atoms(claim);
             let mut missing = Vec::new();
@@ -1437,6 +1614,11 @@ pub fn render_len_expr(e: &LenExpr) -> String {
         }
         LenExpr::Num(n) => n.to_string(),
         LenExpr::Sq(inner) => format!("{}^{}", render_len_expr(inner), 2),
+        LenExpr::Sqrt(inner) => format!("sqrt({})", render_len_expr(inner)),
+        LenExpr::Add(l, r) => format!("{}+{}", render_len_expr(l), render_len_expr(r)),
+        LenExpr::Sub(l, r) => format!("{}-{}", render_len_expr(l), render_len_expr(r)),
+        LenExpr::Mul(l, r) => format!("{}*{}", render_len_expr(l), render_len_expr(r)),
+        LenExpr::Trig(func, angle) => format!("{}({})", func, angle.to_uppercase()),
     }
 }
 
