@@ -131,6 +131,82 @@ fn eq_chain_mixed(items: &[LenExpr]) -> bool {
     })
 }
 
+/// Levenshtein edit distance between two strings.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let m = a.len();
+    let n = b.len();
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 0..=m { dp[i][0] = i; }
+    for j in 0..=n { dp[0][j] = j; }
+    for i in 1..=m {
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            dp[i][j] = std::cmp::min(
+                std::cmp::min(dp[i - 1][j] + 1, dp[i][j - 1] + 1),
+                dp[i - 1][j - 1] + cost,
+            );
+        }
+    }
+    dp[m][n]
+}
+
+/// Known predicate names (lowercase).
+const KNOWN_PREDS: &[&str] = &[
+    "isisosceles", "isacute", "isobtuse", "isright", "ismedian",
+    "issimilar", "isperpendicular", "isparallel", "isanglebisector",
+    "isaltitude", "iscircumcenter", "isincenter", "isorthocenter",
+    "iscentroid", "isperpendicularbisector", "isnone", "isoscelesat",
+    "on", "onsamecircle", "oncircle", "iscirclecenter", "isrectangle",
+    "equals", "rightat",
+];
+
+/// If `name` is not a known predicate, suggest the closest match.
+/// Uses edit distance ≤ 5, or strips common suffixes (Line, Bisector) and
+/// retries with a tighter threshold (for `IsPrependicularLine` → `IsPerpendicular`).
+/// Returns `None` if the name is already known.
+fn suggest_predicate(name: &str) -> Option<String> {
+    let low = name.to_lowercase();
+    if KNOWN_PREDS.contains(&low.as_str()) {
+        return None;
+    }
+    // Try edit distance directly.
+    let mut best: Option<(&str, usize)> = None;
+    for &known in KNOWN_PREDS {
+        let d = edit_distance(&low, known);
+        if d <= 5 {
+            match best {
+                None => best = Some((known, d)),
+                Some((_, bd)) if d < bd => best = Some((known, d)),
+                _ => {}
+            }
+        }
+    }
+    // Strip known suffixes and retry with threshold 3.
+    // e.g. "isprependicularline" → strip "line" → "isprependicular" → distance 1 from "isperpendicular".
+    if best.is_none() || best.unwrap().1 > 3 {
+        for suffix in &["line", "bisector"] {
+            if low.ends_with(suffix) {
+                let stripped = &low[..low.len() - suffix.len()];
+                if stripped.len() >= 5 {
+                    for &known in KNOWN_PREDS {
+                        let d = edit_distance(stripped, known);
+                        if d <= 3 {
+                            match &best {
+                                None => best = Some((known, d)),
+                                Some((_, bd)) if d < *bd => best = Some((known, d)),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(k, _)| crate::claim::display_predicate(k))
+}
+
 fn span_of(pos: crate::ast::Pos, len: usize) -> Span {
     Span { line: pos.line, col: pos.col, len }
 }
@@ -555,6 +631,81 @@ fn derive_rectangle_properties(facts: &mut FactStore) {
                 Claim::pred("OnSameCircle", &[a.clone(), b.clone(), c.clone(), d.clone()], Value::Bool(true)),
                 Origin::Input,
             );
+        }
+    }
+}
+
+/// Derive that a perpendicular foot from a rectangle center to a side is the
+/// midpoint of that side.  In an isosceles triangle (e.g. ZAB with AZ=BZ),
+/// the altitude from the apex to the base bisects the base.
+pub fn derive_perpendicular_foot_midpoints(facts: &mut FactStore) {
+    use crate::claim::Value;
+    // Collect all rectangles and their centers.
+    let mut rects: Vec<(String, String, String, String, String)> = Vec::new();
+    for c in facts.all() {
+        if let Claim::PredVal { name, args, value } = c {
+            if name.eq_ignore_ascii_case("rectangle")
+                && args.len() == 4
+                && value == Value::Bool(true)
+            {
+                let pts: Vec<String> = args.iter().map(|p| Claim::norm_ref(p)).collect();
+                // Find the center (intersection of diagonals).
+                let diag1 = Claim::seg_key(&pts[0], &pts[2]);
+                let diag2 = Claim::seg_key(&pts[1], &pts[3]);
+                for c2 in facts.all() {
+                    if let Claim::On(p, s) = c2 {
+                        if (s == diag1 || s == diag2)
+                            && p.chars().count() == 1
+                        {
+                            // Check if this point is on BOTH diagonals.
+                            let on_other = if s == diag1 { &diag2 } else { &diag1 };
+                            if facts.contains(&Claim::On(p.clone(), on_other.clone())) {
+                                rects.push((pts[0].clone(), pts[1].clone(), pts[2].clone(), pts[3].clone(), p.clone()));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (a, b, c, d, center) in &rects {
+        let sides = [
+            Claim::seg_key(a, b),
+            Claim::seg_key(b, c),
+            Claim::seg_key(c, d),
+            Claim::seg_key(d, a),
+        ];
+        for side in &sides {
+            let side_n = Claim::norm_seg(side);
+            for c2 in facts.all() {
+                if let Claim::PredVal { name, args, value } = c2 {
+                    if name.eq_ignore_ascii_case("isperpendicular")
+                        && args.len() == 2
+                        && value == Value::Bool(true)
+                    {
+                        let seg_n = Claim::norm_seg(&args[0]);
+                        let base_n = Claim::norm_seg(&args[1]);
+                        if base_n == side_n && seg_n.len() == 2 {
+                            let chars: Vec<char> = seg_n.chars().collect();
+                            let e_ch = center.chars().next().unwrap();
+                            if (chars[0] == e_ch && chars[1] != e_ch)
+                                || (chars[1] == e_ch && chars[0] != e_ch)
+                            {
+                                let foot = if chars[0] == e_ch { chars[1] } else { chars[0] };
+                                let foot_s = foot.to_string();
+                                let on_fact = Claim::On(foot_s.clone(), side_n.clone());
+                                if facts.contains(&on_fact) {
+                                    facts.add(
+                                        Claim::pred("IsMedian", &[foot_s, side_n.clone()], Value::Bool(true)),
+                                        Origin::Input,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1384,6 +1535,31 @@ fn process_chain(
     facts: &mut FactStore,
     diags: &mut Vec<Diagnostic>,
 ) {
+    // Check for unknown predicate names and suggest corrections.
+    fn check_pred_names(claims: &[ClaimExpr], diags: &mut Vec<Diagnostic>) {
+        for claim in claims {
+            let (name, pos) = match claim {
+                ClaimExpr::PredEq { name, pos, .. } => (name.as_str(), *pos),
+                ClaimExpr::PredCall { name, pos, .. } => (name.as_str(), *pos),
+                ClaimExpr::Conj { items, .. } => {
+                    check_pred_names(items, diags);
+                    continue;
+                }
+                _ => continue,
+            };
+            let low = name.to_lowercase();
+            if let Some(suggestion) = suggest_predicate(&low) {
+                diags.push(
+                    Diagnostic::error(
+                        span_of(pos, name.len()),
+                        format!("unknown predicate `{}`", crate::claim::display_predicate(name)),
+                    )
+                    .with_note(format!("did you mean `{}`?", suggestion)),
+                );
+            }
+        }
+    }
+    check_pred_names(claims, diags);
     if claims.len() == 1 {
         let expr = &claims[0];
         let atoms = claim_atoms(expr);

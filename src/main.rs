@@ -223,6 +223,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                     }
                     ast::Scope::Global => {
                         checker::apply_input_statements(&mut facts, &scoped_stmts);
+                        checker::derive_perpendicular_foot_midpoints(&mut facts);
                         goal_facts = facts.clone();
                         saturated = prover::forward_saturate(&facts, &rules);
                     }
@@ -584,22 +585,30 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                 let displays = checker::atom_display_strings(claim);
                 let mut goal_failed = false;
                 for (g, display) in atoms.iter().zip(displays.iter()) {
-                    if facts.contains(g) {
-                        println!("{}", display);
-                        continue;
-                    }
+                    // Try to find a proof chain even if the fact is already
+                    // established (e.g. from auto-derivation), so the user
+                    // can see the derivation steps.
                     match prover::prove_seeded(g, &goal_facts, &saturated, &rules) {
                         Some(p) => {
-                            println!("{}", prover::render_chain(&p, Some(display)));
-                            // Make the goal's claim available to later goals so
-                            // they can reuse it instead of re-deriving it.
+                            let tree = prover::render_tree(&p, 0, Some(display));
+                            for line in tree.lines() {
+                                println!("// {}", line);
+                            }
+                            let chain = prover::render_chain(&p, Some(display));
+                            println!("{}", chain);
                             facts.add(g.clone(), checker::Origin::Proof(goal.index, 0));
                             saturated.add(g.clone(), checker::Origin::Proof(goal.index, 0));
                         }
                         None => {
-                            println!("// {}  (cannot be proven)", display);
-                            println!("Nothing");
-                            goal_failed = true;
+                            if facts.contains(g) {
+                                // Already established but no chain found —
+                                // show as a derived fact.
+                                println!("{}  (derived)", display);
+                            } else {
+                                println!("// {}  (cannot be proven)", display);
+                                println!("Nothing");
+                                goal_failed = true;
+                            }
                         }
                     }
                 }

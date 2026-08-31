@@ -39,10 +39,10 @@ proof[1]:
 // IsPrependicular(Line|Segment,Line|Segment) -> Optional[Bool]
 // IsMedian(Point,Segment) -> Optional[Bool]
 // oopsie, i meant BD=DC, but throws it
-(IsIsosceles(ABC)=true && IsPrependicular(AD,BC)) -> IsMedian(D,BC)=True -> BD=BC
+(IsIsosceles(ABC)=true && IsPerpendicular(AD,BC)) -> IsMedian(D,BC)=True -> BD=BC
 // like this:
 // example.geo:42: error: Wrong result: IsMedian(D,BC) -> BD=BC
-//  42 | (IsIsosceles(ABC)=true && IsPrependicular(AD,BC)) -> IsMedian(D,BC)=True -> BD=BC
+//  42 | (IsIsosceles(ABC)=true && IsPerpendicular(AD,BC)) -> IsMedian(D,BC)=True -> BD=BC
 //     |                                                                             ^^^^^
 // hint: modify BD=BC to BD=DC
 // but Nothing also skips the proof if in the proof. :)

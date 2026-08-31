@@ -25,3 +25,8 @@ proof[3]:
 AZ=BZ=CZ=DZ -> AZ^2=BZ^2=CZ^2=DZ^2 -> AZ^2+BZ^2+CZ^2+DZ^2=4*AZ^2
 RightAt(ABC)=B -> AB^2+BC^2=AC^2=(2*AZ)^2=4*AZ^2
 -> AZ^2+BZ^2+CZ^2+DZ^2=AB^2+BC^2+AC^2
+prove:
+9. IsMedian(F,AB)
+proof[9]:
+(IsPerpendicular(FZ,AB)=true && IsPerpendicular(BC,AB)=true) -> IsParallel(FZ,BC)=true
+(IsParallel(FZ,BC)=true && IsMedian(Z,AC)=true) -> IsMedian(F,AB)=true

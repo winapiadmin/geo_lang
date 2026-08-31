@@ -14,10 +14,9 @@ E=Intersection(AB,PerpendicularLine(H,AB))
 I=Midpoint(BE)
 K=PointOn(Ray(H,C))
 HK=BI
-/*
 proof[1]:
 (RightAt(ABC)=A) -> AB^2+AC^2=BC^2 -> AB=sqrt(BC^2-AC^2)=3
-(RightAt(ABC)=A) -> tan(ABC) = AC/AB=4/3 -> Angle(ABC)=arctan(4/3)~53.13
+(RightAt(ABC)=A) -> tan(ABC) = AC/AB=4/3 -> Angle(ABC)=arctan(4/3)
 proof[2]:
 // actually:
 // I=Midpoint(BC)
@@ -27,4 +26,3 @@ proof[3]:
 AB*cos(B)=AB*AB/BC
 AC*cos(C)=AC*AC/BC
 AB*cos(B)+AC*cos(C)=AB^2/BC+AC^2/BC=(AB^2+AC^2)/BC=BC^2/BC=BC
-*/

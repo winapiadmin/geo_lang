@@ -115,7 +115,7 @@ D = Intersection(PrependicularLine(A,BC),BC)
 prove:
 1. BD=DC
 proof[1]:
-(IsIsosceles(ABC)=true && IsPrependicular(AD,BC)) -> IsMedian(D,BC)=True -> BD=DC
+(IsIsosceles(ABC)=true && IsPerpendicular(AD,BC)) -> IsMedian(D,BC)=True -> BD=DC
 "#;
     let diags = check_source(src);
     assert!(diags.iter().all(|d| !d.is_error()), "no errors expected: {:?}", diags);
@@ -177,7 +177,7 @@ prove:
 1. BD=DC
 proof[1]:
 Nothing
-(IsIsosceles(ABC)=true && IsPrependicular(AD,BC)) -> IsMedian(D,BC)=True -> BD=DC
+(IsIsosceles(ABC)=true && IsPerpendicular(AD,BC)) -> IsMedian(D,BC)=True -> BD=DC
 "#;
     let diags = check_source(src);
     assert!(
@@ -968,7 +968,7 @@ prove:
     let proof = prover::prove(&goal, &facts, &rules, 0).expect("Thales theorem");
     assert_eq!(
         prover::render_chain(&proof, Some("AD/DB=AE/EC")),
-        "(On(D,AB) && On(E,AC) && IsParallel(DE,BC)) -> AD/DB=AE/EC"
+        "(On(D,AB) && On(E,AC) && IsParallel(BC,DE)) -> AD/DB=AE/EC"
     );
 }
 

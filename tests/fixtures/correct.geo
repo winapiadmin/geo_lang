@@ -5,4 +5,4 @@ Segment(A,D)
 prove:
 1. BD=DC
 proof[1]:
-(IsIsosceles(ABC)=true && IsPrependicular(AD,BC)) -> IsMedian(D,BC)=True -> BD=DC
+(IsIsosceles(ABC)=true && IsPerpendicular(AD,BC)) -> IsMedian(D,BC)=True -> BD=DC

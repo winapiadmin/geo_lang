@@ -11,5 +11,5 @@ prove:
 1. IsAltitude(AH,ABC)
 2. IsMedian(H,BC)
 3. IsAngleBisector(AH,Angle(BAC))
-// IsPrependicularBisector(Segment,Segment)
+// IsPerpendicularBisector(Segment,Segment)
 4. IsPerpendicularBisector(AH,BC)

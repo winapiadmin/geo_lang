@@ -853,6 +853,26 @@ impl Parser {
         let mut claims = Vec::new();
         let mut k = 0;
         self.parse_chain(&line.toks, &mut k, &mut claims)?;
+        // Handle `A && B -> C` conjunctions in proof steps:
+        // if we stopped at `&&`, collect the conjunction items.
+        if k < line.toks.len() && line.toks[k].kind == TokKind::And {
+            let mut conj_items = claims;
+            while k < line.toks.len() && line.toks[k].kind == TokKind::And {
+                k += 1;
+                let mut next_claims = Vec::new();
+                self.parse_chain(&line.toks, &mut k, &mut next_claims)?;
+                conj_items.extend(next_claims);
+            }
+            claims = vec![ClaimExpr::Conj {
+                items: conj_items,
+                pos,
+            }];
+            // After conjunction, allow `->` continuation.
+            if k < line.toks.len() && line.toks[k].kind == TokKind::Arrow {
+                k += 1;
+                self.parse_chain(&line.toks, &mut k, &mut claims)?;
+            }
+        }
         if k != line.toks.len() {
             return self.err(pos_of(&line.toks[k]), "unexpected tokens after proof step");
         }

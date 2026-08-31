@@ -268,13 +268,21 @@ impl Claim {
                     let seg1 = split_multi_char_points(&args[0]);
                     let seg2 = split_multi_char_points(&args[1]);
                     let normalized: Vec<String> = if name == "ismedian" || name == "isperpendicular" {
-                        // First arg is a point (norm_ref), second is segment (norm_seg)
+                        // IsMedian: first arg is a point (norm_ref), second is segment (norm_seg).
+                        // IsPerpendicular: first arg is the perpendicular line (norm_ref),
+                        // second is the base line (norm_seg) — the numeric solver
+                        // interprets args positionally.
                         vec![
                             Self::norm_ref(&seg1.join("")),
                             Self::norm_seg(&seg2.join("-")),
                         ]
+                    } else if name == "isparallel" {
+                        // IsParallel is symmetric: sort args so A∥B == B∥A.
+                        let a = Self::norm_seg(&seg1.join("-"));
+                        let b = Self::norm_seg(&seg2.join("-"));
+                        if a <= b { vec![a, b] } else { vec![b, a] }
                     } else {
-                        // Both args are segments
+                        // IsPerpendicularBisector: positional (line, segment).
                         vec![
                             Self::norm_seg(&seg1.join("-")),
                             Self::norm_seg(&seg2.join("-")),
@@ -449,13 +457,7 @@ fn ratio_atom_unbound(a: &RatioAtom) -> bool {
 /// Normalize a predicate name, folding documented typos into the canonical
 /// spelling (e.g. `Isprependicular` -> `Isperpendicular`).
 pub fn normalize_pred_name(name: &str) -> String {
-    let n = name.to_lowercase();
-    match n.as_str() {
-        "isprependicular" => "isperpendicular".to_string(),
-        "isoctuse" => "isobtuse".to_string(),
-        "isrightangle" => "isright".to_string(),
-        _ => n,
-    }
+    name.to_lowercase()
 }
 
 /// Render a reference the way a user would write it.

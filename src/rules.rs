@@ -1318,6 +1318,35 @@ pub fn rule_base() -> Vec<Rule> {
                 Value::Bool(true),
             ),
         },
+        // Isosceles triangle altitude bisects base: if ZA = ZB and ZF is
+        // perpendicular to AB with F on AB, then F is the midpoint of AB.
+        Rule {
+            id: "iso-altitude-bisects",
+            antecedents: vec![
+                PClaim::SegEq(
+                    PExpr::Seg2("Z".into(), "A".into()),
+                    PExpr::Seg2("Z".into(), "B".into()),
+                ),
+                PClaim::PredVal(
+                    "isperpendicular".into(),
+                    vec![
+                        PExpr::Seg2("Z".into(), "F".into()),
+                        PExpr::Seg2("A".into(), "B".into()),
+                    ],
+                    Value::Bool(true),
+                ),
+                PClaim::On(PExpr::PtVar("F".into()), PExpr::Seg2("A".into(), "B".into())),
+            ],
+            requires: vec![],
+            consequent: PClaim::PredVal(
+                "ismedian".into(),
+                vec![
+                    PExpr::PtVar("F".into()),
+                    PExpr::Seg2("A".into(), "B".into()),
+                ],
+                Value::Bool(true),
+            ),
+        },
         // Perpendicular from parallel: if AB || CD and EF is perpendicular to CD,
         // then AB is perpendicular to EF (parallel lines share perpendiculars).
         Rule {

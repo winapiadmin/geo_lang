@@ -18,9 +18,37 @@ const MAX_SATURATION: usize = 20000;
 /// Safety cap on intermediate rule bindings per saturation pass.
 const MAX_BINDINGS: usize = 400_000;
 
+/// Check if two claims are equivalent for cycle-detection purposes.
+/// For symmetric predicates (IsParallel, IsPerpendicular), the args are
+/// compared in sorted order so that `A⊥B` ≡ `B⊥A`.
+fn claims_equiv(a: &Claim, b: &Claim) -> bool {
+    match (a, b) {
+        (
+            Claim::PredVal { name: n1, args: a1, value: v1 },
+            Claim::PredVal { name: n2, args: a2, value: v2 },
+        ) if n1 == n2 && v1 == v2 && a1.len() == 2 && a2.len() == 2 => {
+            let symmetric = matches!(
+                n1.as_str(),
+                "isperpendicular" | "isparallel" | "isperpendicularbisector"
+            );
+            if symmetric {
+                let mut p1 = [a1[0].clone(), a1[1].clone()];
+                let mut p2 = [a2[0].clone(), a2[1].clone()];
+                p1.sort();
+                p2.sort();
+                p1 == p2
+            } else {
+                a1 == a2
+            }
+        }
+        _ => a == b,
+    }
+}
+
 /// True for claims that are degenerate by construction, e.g. a "segment"
-/// whose endpoints coincide (`II`) — such bindings carry no geometric
-/// content and only bloat the closure.
+/// whose endpoints coincide (`II`) or a predicate relating a segment to itself
+/// (`IsParallel(AB,AB)`) — such bindings carry no geometric content and only
+/// bloat the closure.
 fn is_degenerate(c: &Claim) -> bool {
     fn deg_seg(s: &str) -> bool {
         let n = Claim::norm_seg(s);
@@ -33,9 +61,19 @@ fn is_degenerate(c: &Claim) -> bool {
                 name.as_str(),
                 "isparallel" | "isperpendicular" | "ismedian" | "isaltitude"
             );
-            seg_pred
-                && args.len() == 2
-                && (deg_seg(&args[0]) || deg_seg(&args[1]))
+            if seg_pred && args.len() == 2 {
+                if deg_seg(&args[0]) || deg_seg(&args[1]) {
+                    return true;
+                }
+                // Self-referential: e.g. IsParallel(AB,AB), IsParallel(AB,BA),
+                // IsPerpendicular(AB,AB), etc.
+                let n0 = Claim::norm_seg(&args[0]);
+                let n1 = Claim::norm_seg(&args[1]);
+                if n0 == n1 {
+                    return true;
+                }
+            }
+            false
         }
         _ => false,
     }
@@ -324,7 +362,7 @@ fn prove_inner(
     rules: &[Rule],
     base: &FactStore,
 ) -> Option<Proof> {
-    prove_rec(goal, saturated, rules, base, PROOF_DEPTH)
+    prove_rec(goal, saturated, rules, base, PROOF_DEPTH, &[])
 }
 
 fn prove_rec(
@@ -333,7 +371,22 @@ fn prove_rec(
     rules: &[Rule],
     base: &FactStore,
     depth: usize,
+    ancestors: &[Claim],
 ) -> Option<Proof> {
+    // Cycle detection: if this goal is already an ancestor in the current
+    // proof branch, we're in a loop — treat as a leaf or fail.
+    if ancestors.iter().any(|a| claims_equiv(a, goal)) {
+        if saturated.contains(goal) {
+            return Some(Proof::leaf(goal.clone()));
+        }
+        return None;
+    }
+    let ancestors = {
+        let mut v = ancestors.to_vec();
+        v.push(goal.clone());
+        v
+    };
+
     fn is_symbolic(p: &PClaim) -> bool {
         matches!(
             p,
@@ -396,7 +449,7 @@ fn prove_rec(
                         let sub = if base.contains(&w) || depth == 0 {
                             Proof::leaf(w)
                         } else {
-                            prove_rec(&w, saturated, rules, base, depth - 1)
+                            prove_rec(&w, saturated, rules, base, depth - 1, &ancestors)
                                 .unwrap_or_else(|| Proof::leaf(w.clone()))
                         };
                         parts.push((pos, sub));
@@ -538,7 +591,7 @@ pub fn render_tree(p: &Proof, indent: usize, final_display: Option<&str>) -> Str
         out.push_str(&format!("{}{}\n", pad, claim_display));
         out.push_str(&format!("{}  by {}:\n", pad, p.rule.unwrap()));
     } else {
-        out.push_str(&format!("{}{}  [fact]\n", pad, p.claim));
+        out.push_str(&format!("{}{}\n", pad, p.claim));
         return out;
     }
     for ant in &p.antecedents {
