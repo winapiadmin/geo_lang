@@ -161,6 +161,21 @@ fn parse_predicate_with_value(left: &str, right: &str, section: &str, path: &Pat
             return Err(format!("{}: {section}: IsMedian needs 2 args", path.display()));
         }
         Ok(PClaim::PredVal("ismedian".into(), args, value))
+    } else if name_lower == "iscircumcenter" {
+        if args.len() != 2 {
+            return Err(format!("{}: {section}: IsCircumcenter needs 2 args", path.display()));
+        }
+        Ok(PClaim::PredVal("iscircumcenter".into(), args, value))
+    } else if name_lower == "isparallelogram" {
+        if args.len() != 4 {
+            return Err(format!("{}: {section}: IsParallelogram needs 4 args", path.display()));
+        }
+        Ok(PClaim::PredVal("isparallelogram".into(), args, value))
+    } else if name_lower == "parallelogram" {
+        if args.len() != 1 {
+            return Err(format!("{}: {section}: Parallelogram needs 1 arg", path.display()));
+        }
+        Ok(PClaim::PredVal("parallelogram".into(), args, value))
     } else if name_lower == "isaltitude" {
         if args.len() != 2 {
             return Err(format!("{}: {section}: IsAltitude needs 2 args", path.display()));
@@ -245,7 +260,8 @@ fn parse_predicate(line: &str, section: &str, path: &Path) -> Result<PClaim, Str
         || name_lower == "isperpendicularbisector"
         || name_lower == "isperpendicular" || name_lower == "isparallel"
         || name_lower == "issimilar" || name_lower == "isisosceles"
-        || name_lower == "isright" {
+        || name_lower == "isright" || name_lower == "isparallelogram"
+        || name_lower == "parallelogram" {
         Ok(PClaim::PredVal(name.to_lowercase(), args, Value::Bool(true)))
     } else if name_lower == "onsamecircle" {
         Ok(PClaim::OnSameCircle(args))

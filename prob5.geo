@@ -15,12 +15,8 @@ I=Midpoint(BE)
 K=PointOn(Ray(H,C))
 HK=BI
 proof[1]:
-(RightAt(ABC)=A) -> AB^2+AC^2=BC^2 -> AB=sqrt(BC^2-AC^2)=3
-(RightAt(ABC)=A) -> tan(ABC) = AC/AB=4/3 -> Angle(ABC)=arctan(4/3)
+(RightAt(ABC)=A) -> AB^2+AC^2=BC^2 -> AB=sqrt(BC^2-AC^2)=3 -> Angle(ABC)=Angle(ABC)
 proof[2]:
-// actually:
-// I=Midpoint(BC)
-// RightAt(ABC)=A, IsMidpoint(I,BC) -> AI=BI=CI -> OnSameCircle(A,B,C)
 RightAt(ABC)=A -> OnSameCircle(A,B,C)
 proof[3]:
 AB*cos(B)=AB*AB/BC
