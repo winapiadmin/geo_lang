@@ -10,13 +10,13 @@ use crate::claim::Claim;
 use crate::rules::{instantiate, match_pat, Bindings, Rule, PClaim};
 use std::collections::HashMap;
 
-pub const MAX_DEPTH: usize = 12;
+pub const MAX_DEPTH: usize = 16;
 
 /// How many new facts the forward pass may derive per goal.
-const MAX_SATURATION: usize = 20000;
+const MAX_SATURATION: usize = 200_000;
 
 /// Safety cap on intermediate rule bindings per saturation pass.
-const MAX_BINDINGS: usize = 400_000;
+const MAX_BINDINGS: usize = 4_000_000;
 
 /// Check if two claims are equivalent for cycle-detection purposes.
 /// For symmetric predicates (IsParallel, IsPerpendicular), the args are
@@ -144,17 +144,23 @@ fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> F
         delta: &std::collections::HashSet<Claim>,
         first_pass: bool,
     ) -> Vec<Claim> {
-        let mut cur: Vec<(Bindings, usize)> = vec![(Bindings::new(), 0)];
+        let mut cur: Vec<(Bindings, usize, std::collections::HashSet<String>)> =
+            vec![(Bindings::new(), 0, std::collections::HashSet::new())];
         for ant in &rule.antecedents {
             // Candidate facts: those whose shape can possibly match.
             let mut cands: Vec<&Claim> = Vec::new();
             collect_shape_candidates(ant, idx, &mut cands);
             let mut next = Vec::new();
-            'outer: for (bind, dcount) in &cur {
+            'outer: for (bind, dcount, used) in &cur {
                 for f in &cands {
+                    if used.contains(&f.to_string()) {
+                        continue;
+                    }
                     let novel = delta.contains(*f);
                     for nb in match_pat(f, ant, bind) {
-                        next.push((nb, dcount + usize::from(novel)));
+                        let mut new_used = used.clone();
+                        new_used.insert(f.to_string());
+                        next.push((nb, dcount + usize::from(novel), new_used));
                         if next.len() > MAX_BINDINGS {
                             break 'outer;
                         }
@@ -169,7 +175,7 @@ fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> F
         // Semi-naive filter: keep only bindings that used >=1 novel fact
         // (on the first pass every fact counts as novel).
         let mut out = Vec::new();
-        for (bind, dcount) in cur {
+        for (bind, dcount, _used) in cur {
             if !first_pass && dcount == 0 {
                 continue;
             }
@@ -232,7 +238,13 @@ fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> F
         let delta_set: std::collections::HashSet<Claim> = delta.iter().cloned().collect();
         let mut new_delta: Vec<Claim> = Vec::new();
         for rule in rules {
-            if rule.id.contains("invthales") {
+            if rule.id.contains("invthales")
+                || rule.id.starts_with("subset-parallel")
+                || rule.id.starts_with("midpoint-ratio")
+                || rule.id.starts_with("similarity-proportional")
+                || rule.id.starts_with("parallel-corresponding")
+                || rule.id.starts_with("ratio-double")
+            {
                 continue;
             }
             for c in join_rule(rule, &index, &delta_set, passes == 0) {
@@ -253,6 +265,47 @@ fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> F
             break;
         }
     }
+    // Second pass: apply rules that were skipped in the main loop to produce
+    // derived facts (AngleEq, RatioEq, On from IsMedian) needed by backward
+    // chaining. These rules are kept separate because they can cause
+    // combinatorial explosion if applied during the main saturation.
+    {
+        let skipped_ids: &[&str] = &[
+            "subset-parallel", "subset-parallel-right",
+            "midpoint-ratio", "midpoint-ratio-right",
+            "similarity-proportional-sides", "similarity-proportional-sides-2", "similarity-proportional-sides-3",
+            "parallel-corresponding-angles", "parallel-corresponding-angles-2",
+            "ratio-double",
+            "median-implies-on",
+            "aa-similarity",
+            "similarity-symmetry",
+            "collinearity-via-midpoint",
+            "segment-bisector-median",
+            "ratio-same-denom-segeq",
+            "ratio-same-denom-segeq-inv",
+        ];
+        let skipped_rules: Vec<&Rule> = rules.iter()
+            .filter(|r| skipped_ids.iter().any(|id| r.id == *id))
+            .collect();
+        let mut delta: Vec<Claim> = store.all();
+        let mut p2 = 0usize;
+        while !delta.is_empty() && p2 < 4 {
+            let current = store.all();
+            let index = build_index(&current);
+            let delta_set: std::collections::HashSet<Claim> = delta.iter().cloned().collect();
+            let mut new_delta: Vec<Claim> = Vec::new();
+            for rule in &skipped_rules {
+                for c in join_rule(rule, &index, &delta_set, p2 == 0) {
+                    if !store.contains(&c) {
+                        store.add(c.clone(), Origin::Proof(0, 0));
+                        new_delta.push(c.clone());
+                    }
+                }
+            }
+            delta = new_delta;
+            p2 += 1;
+        }
+    }
     // Checker-side closures may unlock new length equalities once derived
     // facts (e.g. circumcenter equidistance) exist; stabilize.
     while closure_runs < 4 {
@@ -271,7 +324,13 @@ fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> F
             let delta_set: std::collections::HashSet<Claim> = delta.iter().cloned().collect();
             let mut new_delta: Vec<Claim> = Vec::new();
             for rule in rules {
-                if rule.id.contains("invthales") {
+                if rule.id.contains("invthales")
+                    || rule.id.starts_with("subset-parallel")
+                    || rule.id.starts_with("midpoint-ratio")
+                    || rule.id.starts_with("similarity-proportional")
+                    || rule.id.starts_with("parallel-corresponding")
+                    || rule.id.starts_with("ratio-double")
+                {
                     continue;
                 }
                 for c in join_rule(rule, &index, &delta_set, false) {
@@ -287,7 +346,7 @@ fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> F
                 }
             }
             delta = new_delta;
-            p2 += 1;
+p2 += 1;
         }
     }
     store
@@ -432,11 +491,15 @@ fn prove_rec(
                 // when the witness is itself derived (not an input fact).
                 {
                     let mut probe = vec![bind.clone()];
+                    let mut used_witnesses: std::collections::HashSet<String> = std::collections::HashSet::new();
                     for &(pos, ant) in &structural {
                         let mut witness: Option<Claim> = None;
                         let mut survived: Vec<Bindings> = Vec::new();
                         for b in &probe {
                             for f in &store_snapshot {
+                                if used_witnesses.contains(&f.to_string()) {
+                                    continue;
+                                }
                                 for nb in match_pat(&f, ant, b) {
                                     if witness.is_none() {
                                         witness = Some(f.clone());
@@ -445,7 +508,26 @@ fn prove_rec(
                                 }
                             }
                         }
-                        let w = witness?;
+                        let w = match witness {
+                            Some(w) => w,
+                            None => {
+                                // No fact matches this structural antecedent.
+                                // Try to prove it by recursing backward — this
+                                // allows rules like segment-bisector-median to
+                                // derive IsMedian(Q2,BC) from ratio facts.
+                                // Only try when all pattern vars are bound.
+                                let inst = instantiate(ant, &bind);
+                                if inst.has_unbound() || depth == 0 {
+                                    continue 'binds;
+                                }
+                                if let Some(sub) = prove_rec(&inst, saturated, rules, base, depth - 1, &ancestors) {
+                                    parts.push((pos, sub));
+                                    continue;
+                                }
+                                continue 'binds;
+                            }
+                        };
+                        used_witnesses.insert(w.to_string());
                         let sub = if base.contains(&w) || depth == 0 {
                             Proof::leaf(w)
                         } else {
@@ -474,6 +556,13 @@ fn prove_rec(
                         parts.push((pos, np));
                         continue;
                     }
+                    // Also try numeric derivation against saturated store
+                    // (RatioEq facts derived by forward saturation may
+                    // enable ratio-to-segment conversion).
+                    if let Some(np) = crate::symbolic::numeric_proof(&inst, saturated) {
+                        parts.push((pos, np));
+                        continue;
+                    }
                     if saturated.contains(&inst) {
                         parts.push((pos, Proof::leaf(inst)));
                         continue;
@@ -497,8 +586,14 @@ fn prove_rec(
             }
         }
     }
+
     // Fall back to treating the goal as an established (derived) fact.
     if saturated.contains(goal) {
+        return Some(Proof::leaf(goal.clone()));
+    }
+    // Try numeric/coordinate derivation as a last resort (including
+    // ratio-to-segment conversion using saturated ratio facts).
+    if crate::symbolic::numeric_solves(goal, saturated) {
         return Some(Proof::leaf(goal.clone()));
     }
     None
@@ -543,7 +638,32 @@ pub fn to_chain(p: &Proof) -> Vec<(String, bool)> {
 /// Render a proof as a compact chain using the language's `->` syntax. If
 /// `final_display` is given it overrides the rendering of the final claim
 /// (used to preserve the user's own spelling, e.g. `BD=DC`).
+/// If the proof has multiple independent antecedent branches with their own
+/// sub-proofs, each branch is rendered on its own line.
 pub fn render_chain(p: &Proof, final_display: Option<&str>) -> String {
+    // Check if root has multiple antecedents that each have their own premises
+    let has_complex_branches = p.antecedents.len() > 1
+        && p.antecedents.iter().all(|ant| !ant.antecedents.is_empty());
+
+    if has_complex_branches {
+        let mut lines = Vec::new();
+        for ant in &p.antecedents {
+            // Render each complex branch on its own line
+            let sub_chain = render_chain(ant, None);
+            lines.push(sub_chain);
+        }
+        // Final step combining the antecedents
+        let final_claim = if let Some(d) = final_display { d.to_string() } else { p.claim.to_string() };
+        let rule = p.rule.unwrap_or("");
+        if !rule.is_empty() {
+            lines.push(format!("({}) -> {}", p.antecedents.iter().map(|a| a.claim.to_string()).collect::<Vec<_>>().join(" && "), final_claim));
+        } else {
+            lines.push(final_claim);
+        }
+        return lines.join("\n");
+    }
+
+    // Single branch or simple multiple premises - original logic
     let chain = to_chain(p);
     let mut premises: Vec<String> = Vec::new();
     let mut conclusions: Vec<String> = Vec::new();
@@ -587,11 +707,11 @@ pub fn render_tree(p: &Proof, indent: usize, final_display: Option<&str>) -> Str
     } else {
         p.claim.to_string()
     };
-    if p.rule.is_some() {
+if p.rule.is_some() {
         out.push_str(&format!("{}{}\n", pad, claim_display));
         out.push_str(&format!("{}  by {}:\n", pad, p.rule.unwrap()));
     } else {
-        out.push_str(&format!("{}{}\n", pad, p.claim));
+        out.push_str(&format!("{}{}  [fact]\n", pad, p.claim));
         return out;
     }
     for ant in &p.antecedents {

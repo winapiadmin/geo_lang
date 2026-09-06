@@ -16,6 +16,7 @@
 use crate::claim::{Claim, RatioAtom, RatioExpr, Value};
 use crate::checker::{render_len_expr, split_seg, FactStore};
 use crate::prover::Proof;
+use crate::checker;
 use std::collections::HashMap;
 
 /// How a numeric value was derived: the rule name and the numeric claims it
@@ -612,6 +613,43 @@ pub fn ratio_solves(goal: &Claim, facts: &FactStore) -> bool {
                 return true;
             }
         }
+        // Ratio transitivity: if X=Y and Y=Z are facts, then X=Z.
+        // Also try with symmetric matching (fact sides may be stored in either order).
+        let all = facts.all();
+        for f in &all {
+            if let Claim::RatioEq(fl, fr) = f {
+                if fl == l && fr == r {
+                    return true;
+                }
+                if fl == l {
+                    for f2 in &all {
+                        if let Claim::RatioEq(fl2, fr2) = f2 {
+                            if fl2 == fr && fr2 == r {
+                                return true;
+                            }
+                            if fl2 == r && fr2 == fr {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                if fr == l && fl == r {
+                    return true;
+                }
+                if fr == l {
+                    for f2 in &all {
+                        if let Claim::RatioEq(fl2, fr2) = f2 {
+                            if fl2 == fl && fr2 == r {
+                                return true;
+                            }
+                            if fl2 == r && fr2 == fl {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         false
     } else {
         false
@@ -627,10 +665,65 @@ pub fn numeric_solves(goal: &Claim, facts: &FactStore) -> bool {
             let env = compute(facts);
             env.sq.get(&Claim::norm_seg(seg)).copied() == Some(*v)
         }
-        Claim::SegEq(a, b) => match (solve_len(a, facts), solve_len(b, facts)) {
-            (Some(x), Some(y)) => x == y,
-            _ => false,
-        },
+        Claim::SegEq(a, b) => {
+            if let (Some(x), Some(y)) = (solve_len(a, facts), solve_len(b, facts)) {
+                if x == y {
+                    return true;
+                }
+            }
+            // Ratio-to-segment: if AB/X = CD/X for some X and ratio R,
+            // then AB = CD.
+            let na = Claim::norm_seg(a);
+            let nb = Claim::norm_seg(b);
+            let all = facts.all();
+            for f in &all {
+                if let Claim::RatioEq(ratio_a, ratio_b) = f {
+                    if let RatioExpr::Quot {
+                        num: RatioAtom::Seg(seg_a),
+                        den: RatioAtom::Seg(seg_x1),
+                    } = ratio_a
+                    {
+                        if Claim::norm_seg(seg_a) == na {
+                            for f2 in &all {
+                                if let Claim::RatioEq(ratio_c, ratio_d) = f2 {
+                                    if *ratio_b == *ratio_d {
+                                        if let RatioExpr::Quot {
+                                            num: RatioAtom::Seg(seg_b),
+                                            den: RatioAtom::Seg(seg_x2),
+                                        } = ratio_c
+                                        {
+                                            let nb2 = Claim::norm_seg(seg_b);
+                                            let nx1 = Claim::norm_seg(seg_x1);
+                                            let nx2 = Claim::norm_seg(seg_x2);
+                                            if nb2 == nb && nx1 == nx2 {
+                                                return true;
+                                            }
+                                            // Also check if denominators are
+                                            // provably equal via SegEq.
+                                            if nb2 == nb && nx1 != nx2 {
+                                                if all.iter().any(|s| {
+                                                    matches!(
+                                                        s,
+                                                        Claim::SegEq(d1, d2)
+                                                            if (Claim::norm_seg(d1) == nx1
+                                                                && Claim::norm_seg(d2) == nx2)
+                                                                || (Claim::norm_seg(d1) == nx2
+                                                                    && Claim::norm_seg(d2) == nx1)
+                                                    )
+                                                }) {
+                                                    return true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        }
         _ => ratio_solves(goal, facts),
     }
 }
@@ -1233,6 +1326,114 @@ pub fn law_of_cosines_derive(
     Some(out)
 }
 
+/// Proof version of law of cosines derivation - returns a Proof tree.
+pub fn law_of_cosines_proof(
+    items: &[crate::ast::LenExpr],
+    facts: &FactStore,
+) -> Option<Proof> {
+    use crate::ast::LenExpr;
+    if items.len() != 2 {
+        return None;
+    }
+    let (lhs, rhs) = (&items[0], &items[1]);
+    let (sq_side, expr_side) = match (lhs, rhs) {
+        (LenExpr::Sq(_), _) => (lhs, rhs),
+        (_, LenExpr::Sq(_)) => (rhs, lhs),
+        _ => return None,
+    };
+    let side_name = match sq_side {
+        LenExpr::Sq(inner) => inner.seg(),
+        _ => return None,
+    };
+    if side_name.chars().count() != 2 {
+        return None;
+    }
+    let mut sn: Vec<char> = side_name.chars().collect();
+    sn.sort();
+    let s1 = sn[0].to_uppercase().next().unwrap();
+    let s2 = sn[1].to_uppercase().next().unwrap();
+
+    let v = find_cos_vertex(expr_side)?;
+    if s1 == v || s2 == v {
+        return None;
+    }
+
+    let side_v_s1 = if s1 < v { format!("{}{}", s1, v) } else { format!("{}{}", v, s1) };
+    let side_v_s2 = if s2 < v { format!("{}{}", s2, v) } else { format!("{}{}", v, s2) };
+
+    let (x_seg, y_seg) = extract_sum_sq_sub_mul(expr_side)?;
+    let xs = Claim::norm_seg(&x_seg);
+    let ys = Claim::norm_seg(&y_seg);
+    let a_n = Claim::norm_seg(&side_v_s1);
+    let b_n = Claim::norm_seg(&side_v_s2);
+    if !((xs == a_n && ys == b_n) || (xs == b_n && ys == a_n)) {
+        return None;
+    }
+
+    let fc = find_foot(v, s1, s2, facts)?;
+    let h_disp = fc.foot.to_uppercase();
+    let apex_disp = fc.apex.to_uppercase();
+    let far_disp = fc.far_base.to_uppercase();
+    let v_disp = v.to_uppercase();
+
+    let hyp_disp = format!("{}{}", s1.to_uppercase(), s2.to_uppercase());
+
+    if !verify_loc_numeric(
+        s1, s2, v, fc.foot, fc.apex, &x_seg, &y_seg, expr_side,
+    ) {
+        return None;
+    }
+
+    let goal_display = format!(
+        "{}={}",
+        checker::render_len_expr(&items[0]),
+        checker::render_len_expr(&items[1])
+    );
+    let goal_claim = Claim::PredVal {
+        name: "eqchain".to_string(),
+        args: vec![goal_display],
+        value: Value::Bool(true),
+    };
+
+    let _tri_name = format!("{}{}{}", apex_disp, h_disp, far_disp);
+    let _tri_name_cos = format!("{}{}{}", apex_disp, h_disp, v_disp);
+
+    let step1 = format!("{}^2={}{}^2+{}{}^2", hyp_disp, apex_disp, h_disp, far_disp, h_disp);
+    let step2 = format!("{}*cos({})={}*{}/{}", nseg_disp_to_upper(&x_seg), v_disp, nseg_disp_to_upper(&x_seg), nseg_disp_to_upper(&y_seg), h_disp);
+    let _step3 = format!("{}^2={}^2+{}^2-2*{}*{}*cos({})", hyp_disp, nseg_disp_to_upper(&x_seg), nseg_disp_to_upper(&y_seg), nseg_disp_to_upper(&x_seg), nseg_disp_to_upper(&y_seg), v_disp);
+
+    let p1_claim = Claim::PredVal {
+        name: "eqchain".to_string(),
+        args: vec![step1],
+        value: Value::Bool(true),
+    };
+    let p2_claim = Claim::PredVal {
+        name: "eqchain".to_string(),
+        args: vec![step2],
+        value: Value::Bool(true),
+    };
+
+    let p1 = Proof {
+        claim: p1_claim,
+        rule: Some("pythagoras"),
+        antecedents: vec![],
+    };
+
+    let p2 = Proof {
+        claim: p2_claim,
+        rule: Some("cos-definition"),
+        antecedents: vec![],
+    };
+
+    let p3 = Proof {
+        claim: goal_claim,
+        rule: Some("law-of-cosines"),
+        antecedents: vec![p1, p2],
+    };
+
+    Some(p3)
+}
+
 /// Derive a rectangle diagonal identity: for a rectangle `IsRectangle(A,B,C,D)`
 /// with center `E` (equidistant from all vertices), the identity
 ///   AE²+BE²+CE²+DE² = AB²+BC²
@@ -1323,6 +1524,120 @@ pub fn rectangle_diagonal_derive(
         center_disp,
     ));
     Some(out)
+}
+
+/// Proof version of rectangle diagonal derivation - returns a Proof tree.
+pub fn rectangle_diagonal_proof(
+    items: &[crate::ast::LenExpr],
+    _facts: &FactStore,
+) -> Option<Proof> {
+    use crate::ast::LenExpr;
+    if items.len() != 2 {
+        return None;
+    }
+    fn collect_sq_segs(e: &LenExpr) -> Option<Vec<String>> {
+        match e {
+            LenExpr::Sq(inner) => match inner.as_ref() {
+                LenExpr::Seg(s) => Some(vec![s.clone()]),
+                _ => None,
+            },
+            LenExpr::Add(l, r) => {
+                let mut v = collect_sq_segs(l)?;
+                v.extend(collect_sq_segs(r)?);
+                Some(v)
+            }
+            _ => None,
+        }
+    }
+    let left_segs = collect_sq_segs(&items[0])?;
+    let right_segs = collect_sq_segs(&items[1])?;
+    if left_segs.len() != 4 || right_segs.len() != 2 {
+        return None;
+    }
+    let chars0: Vec<char> = left_segs[0].chars().collect();
+    let center_ch = if left_segs[1..].iter().all(|s| s.contains(chars0[0])) {
+        chars0[0]
+    } else if left_segs[1..].iter().all(|s| s.contains(chars0[1])) {
+        chars0[1]
+    } else {
+        return None;
+    };
+    let vertices: Vec<String> = left_segs
+        .iter()
+        .map(|s| {
+            s.chars()
+                .find(|c| *c != center_ch)
+                .map(|c| c.to_string())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if vertices.len() != 4 {
+        return None;
+    }
+    let _center_disp = center_ch.to_uppercase().to_string();
+    let v_disp: Vec<String> = vertices.iter().map(|v| v.to_uppercase()).collect();
+    let first_seg = left_segs[0].to_uppercase();
+    let diag_seg = Claim::seg_key(&vertices[0], &vertices[2]).to_uppercase();
+
+    let goal_display = format!(
+        "{}={}",
+        checker::render_len_expr(&items[0]),
+        checker::render_len_expr(&items[1])
+    );
+    let goal_claim = Claim::PredVal {
+        name: "eqchain".to_string(),
+        args: vec![goal_display],
+        value: Value::Bool(true),
+    };
+
+    let _tri_name = format!("{}{}{}", v_disp[0], v_disp[1], v_disp[2]);
+
+    let step1 = format!("{}^2+{}^2+{}^2+{}^2=4*{}^2",
+        left_segs[0].to_uppercase(), left_segs[1].to_uppercase(),
+        left_segs[2].to_uppercase(), left_segs[3].to_uppercase(), first_seg);
+    let step2 = format!("{}^2+{}^2={}^2", right_segs[0].to_uppercase(), right_segs[1].to_uppercase(), diag_seg);
+    let step3 = format!("{}=2*{}", diag_seg, first_seg);
+
+    let p1_claim = Claim::PredVal {
+        name: "eqchain".to_string(),
+        args: vec![step1],
+        value: Value::Bool(true),
+    };
+    let p2_claim = Claim::PredVal {
+        name: "eqchain".to_string(),
+        args: vec![step2],
+        value: Value::Bool(true),
+    };
+    let p3_claim = Claim::PredVal {
+        name: "eqchain".to_string(),
+        args: vec![step3],
+        value: Value::Bool(true),
+    };
+
+    let p1 = Proof {
+        claim: p1_claim,
+        rule: Some("rectangle-equidistant"),
+        antecedents: vec![],
+    };
+
+    let p2 = Proof {
+        claim: p2_claim,
+        rule: Some("pythagoras"),
+        antecedents: vec![],
+    };
+
+    let p3 = Proof {
+        claim: p3_claim,
+        rule: Some("midpoint-diagonal"),
+        antecedents: vec![],
+    };
+
+    let p_final = Proof {
+        claim: goal_claim,
+        rule: Some("rectangle-diagonal-identity"),
+        antecedents: vec![p1, p2, p3],
+    };
+
+    Some(p_final)
 }
 
 /// The foot of a perpendicular construction.
@@ -1638,6 +1953,65 @@ pub fn numeric_proof(goal: &Claim, facts: &FactStore) -> Option<Proof> {
                     p.antecedents.push(explain_len(&env, b, y));
                     p.rule = Some("numeric-equality");
                     return Some(p);
+                }
+            }
+            // Ratio-to-segment: if AB/X = CD/X for some X and ratio R,
+            // then AB = CD. Also handles equal denominators via SegEq.
+            let na = Claim::norm_seg(a);
+            let nb = Claim::norm_seg(b);
+            let all = facts.all();
+            for f in &all {
+                if let Claim::RatioEq(ratio_a, ratio_b) = f {
+                    if let RatioExpr::Quot {
+                        num: RatioAtom::Seg(seg_a),
+                        den: RatioAtom::Seg(seg_x1),
+                    } = ratio_a
+                    {
+                        if Claim::norm_seg(seg_a) == na {
+                            for f2 in &all {
+                                if let Claim::RatioEq(ratio_c, ratio_d) = f2 {
+                                    if *ratio_b == *ratio_d {
+                                        if let RatioExpr::Quot {
+                                            num: RatioAtom::Seg(seg_b),
+                                            den: RatioAtom::Seg(seg_x2),
+                                        } = ratio_c
+                                        {
+                                            let nb2 = Claim::norm_seg(seg_b);
+                                            let nx1 = Claim::norm_seg(seg_x1);
+                                            let nx2 = Claim::norm_seg(seg_x2);
+                                            let denom_ok = if nb2 == nb && nx1 == nx2 {
+                                                true
+                                            } else if nb2 == nb && nx1 != nx2 {
+                                                all.iter().any(|s| {
+                                                    matches!(
+                                                        s,
+                                                        Claim::SegEq(d1, d2)
+                                                            if (Claim::norm_seg(d1) == nx1
+                                                                && Claim::norm_seg(d2) == nx2)
+                                                                || (Claim::norm_seg(d1) == nx2
+                                                                    && Claim::norm_seg(d2) == nx1)
+                                                    )
+                                                })
+                                            } else {
+                                                false
+                                            };
+                                            if denom_ok {
+                                                let p = Proof {
+                                                    claim: goal.clone(),
+                                                    antecedents: vec![
+                                                        Proof { claim: f.clone(), antecedents: vec![], rule: None },
+                                                        Proof { claim: f2.clone(), antecedents: vec![], rule: None },
+                                                    ],
+                                                    rule: Some("ratio-segeq"),
+                                                };
+                                                return Some(p);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             None
@@ -2110,7 +2484,29 @@ fn eval_atom_on_line(a: &RatioAtom, coords: &LineCoords, line: &str) -> Option<(
                 if chars.len() == 2 {
                     (chars[0].to_string(), chars[1].to_string())
                 } else {
-                    return None;
+                    // Multi-char point names: letter+digits? pairs
+                    let points: Vec<String> = {
+                        let mut result = Vec::new();
+                        let mut i = 0;
+                        while i < chars.len() {
+                            if !chars[i].is_ascii_alphabetic() {
+                                i += 1;
+                                continue;
+                            }
+                            let start = i;
+                            i += 1;
+                            while i < chars.len() && chars[i].is_ascii_digit() {
+                                i += 1;
+                            }
+                            result.push(chars[start..i].iter().collect());
+                        }
+                        result
+                    };
+                    if points.len() == 2 {
+                        (points[0].clone(), points[1].clone())
+                    } else {
+                        return None;
+                    }
                 }
             };
             

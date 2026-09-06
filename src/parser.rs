@@ -162,6 +162,17 @@ impl Parser {
                         file.input_props.push(prop);
                         continue;
                     }
+                    // A `proof[N]:` header in an inp section switches back to Prove.
+                    if is_proof_header(&line) {
+                        section = Section::Prove;
+                        scoped = None;
+                        if let Some(p) = in_proof.take() {
+                            file.proofs.push(p);
+                        }
+                        let block = self.parse_proof_header(&line)?;
+                        in_proof = Some(block);
+                        continue;
+                    }
                     let mut stmts = Vec::new();
                     self.parse_input_stmt_into(&line, &mut stmts)?;
                     for s in stmts {

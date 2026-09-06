@@ -4,7 +4,7 @@
 use crate::ast::{ClaimExpr, File, Geom, InputStmt, LenExpr, RadiusSpec, Scope, Step};
 use crate::claim::{Claim, RatioAtom, RatioExpr, Value};
 use crate::diag::{Diagnostic, Span};
-use crate::rules::{apply_rule, find_hint, rule_base};
+use crate::rules::{apply_rule, derive_all, find_hint, rule_base};
 use std::collections::HashMap;
 
 /// Where a fact was established.
@@ -83,7 +83,14 @@ pub fn claim_atoms(expr: &ClaimExpr) -> Vec<Claim> {
                     // (distances are nonnegative).
                     out.push(Claim::seg_eq(&l.seg(), &r.seg()));
                 } else {
-                    out.push(Claim::seg_eq(&l.seg(), &r.seg()));
+                    // When either side is an arithmetic expression (Add/Sub/Mul),
+                    // don't produce a SegEq — it would lose information.
+                    // These are handled by numeric verification in process_chain.
+                    let has_arith = matches!(l, LenExpr::Add(..) | LenExpr::Sub(..) | LenExpr::Mul(..))
+                        || matches!(r, LenExpr::Add(..) | LenExpr::Sub(..) | LenExpr::Mul(..));
+                    if !has_arith {
+                        out.push(Claim::seg_eq(&l.seg(), &r.seg()));
+                    }
                 }
             }
             out
@@ -754,6 +761,29 @@ pub fn split_seg(seg: &str) -> Option<(String, String)> {
     } else if s.len() == 2 {
         let chars: Vec<char> = s.chars().collect();
         return Some((chars[0].to_string(), chars[1].to_string()));
+    } else {
+        // Multi-char point names: letter+digits? pairs (e.g., "bq2" = "b" + "q2")
+        let points: Vec<String> = {
+            let mut result = Vec::new();
+            let mut i = 0;
+            let bytes: Vec<char> = s.chars().collect();
+            while i < bytes.len() {
+                if !bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                    continue;
+                }
+                let start = i;
+                i += 1;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                result.push(bytes[start..i].iter().collect());
+            }
+            result
+        };
+        if points.len() == 2 {
+            return Some((points[0].clone(), points[1].clone()));
+        }
     }
     None
 }
@@ -776,6 +806,12 @@ pub fn apply_proofs(file: &File, facts: &mut FactStore) -> Vec<Diagnostic> {
         let scope = scope_map.get(&proof.index).copied().unwrap_or(Scope::Global);
         let mut local = FactStore::new();
         let store: &mut FactStore = if scope == Scope::Local { &mut local } else { facts };
+        // Apply scoped inp[N]: statements for this proof's goal index.
+        for (idx, stmt) in &file.scoped_input {
+            if *idx == proof.index {
+                process_input(stmt, store, &mut diags, &std::collections::HashMap::new(), &std::collections::HashMap::new());
+            }
+        }
         process_proof(proof, store, &mut diags);
     }
 
@@ -1205,20 +1241,23 @@ fn process_construction(
             }
             // The intersection point lies on every operand.
             for g in geoms {
+                // Normalize the intersection point name to lowercase for
+                // consistency with angle / ratio normalization.
+                let n_norm = Claim::norm_ref(&n);
                 match g {
                     Geom::Ref(r) => {
                         if r.chars().count() == 2 {
                             let seg_n = Claim::norm_seg(r);
-                            facts.add(Claim::On(n.clone(), seg_n.clone()), Origin::Input);
-                            facts.add(Claim::OnSegment(n.clone(), seg_n), Origin::Input);
+                            facts.add(Claim::On(n_norm.clone(), seg_n.clone()), Origin::Input);
+                            facts.add(Claim::OnSegment(n_norm.clone(), seg_n), Origin::Input);
                         } else if let Some((point, base)) = known.get(&Claim::norm_ref(r)) {
                             // A named perpendicular line `L = PerpendicularLine(point, base)`:
                             // the intersection point lies on the base, and the
                             // segment from `point` to it is perpendicular to the base.
                             let base_n = Claim::norm_seg(base);
-                            facts.add(Claim::On(n.clone(), base_n.clone()), Origin::Input);
-                            facts.add(Claim::OnSegment(n.clone(), base_n), Origin::Input);
-                            let seg = Claim::seg_key(point, &n);
+                            facts.add(Claim::On(n_norm.clone(), base_n.clone()), Origin::Input);
+                            facts.add(Claim::OnSegment(n_norm.clone(), base_n), Origin::Input);
+                            let seg = Claim::seg_key(point, &n_norm);
                             facts.add(
                                 Claim::pred(
                                     "IsPerpendicular",
@@ -1242,9 +1281,9 @@ fn process_construction(
                         // The point lies on the base, and the perpendicular
                         // through `point` to the base is perpendicular to it.
                         let base_n = Claim::norm_seg(base);
-                        facts.add(Claim::On(n.clone(), base_n.clone()), Origin::Input);
-                        facts.add(Claim::OnSegment(n.clone(), base_n), Origin::Input);
-                        let seg = Claim::seg_key(point, &n);
+                        facts.add(Claim::On(n_norm.clone(), base_n.clone()), Origin::Input);
+                        facts.add(Claim::OnSegment(n_norm.clone(), base_n), Origin::Input);
+                        let seg = Claim::seg_key(point, &n_norm);
                         facts.add(
                             Claim::pred(
                                 "IsPerpendicular",
@@ -1260,7 +1299,7 @@ fn process_construction(
                         // Auto-derive right angles: the perpendicular segment
                         // creates right triangles at the foot.
                         let pchars: Vec<char> = point.chars().collect();
-                        let hchars: Vec<char> = n.chars().collect();
+                        let hchars: Vec<char> = n_norm.chars().collect();
                         if pchars.len() == 1 && hchars.len() == 1 && base.len() == 2 {
                             let a = base.chars().next().unwrap();
                             let b = base.chars().nth(1).unwrap();
@@ -1279,7 +1318,7 @@ fn process_construction(
                                     Claim::PredVal {
                                         name: "rightat".into(),
                                         args: vec![tri.clone()],
-                                        value: Value::Point(n.to_uppercase()),
+                                        value: Value::Point(n_norm.to_uppercase()),
                                     },
                                     Origin::Input,
                                 );
@@ -1297,7 +1336,17 @@ fn process_construction(
                     Geom::Line { a, b, .. } => {
                         // An explicit line: the intersection point lies on it.
                         facts.add(
-                            Claim::On(n.clone(), Claim::seg_key(a, b)),
+                            Claim::On(n_norm.clone(), Claim::seg_key(a, b)),
+                            Origin::Input,
+                        );
+                        // The intersection point and the two line endpoints are
+                        // collinear: a, b, Q2 are on the same line.
+                        facts.add(
+                            Claim::pred(
+                                "iscollinear",
+                                &[a.clone(), b.clone(), n_norm.to_string()],
+                                Value::Bool(true),
+                            ),
                             Origin::Input,
                         );
                     }
@@ -1631,6 +1680,64 @@ fn process_chain(
                 ));
                 continue;
             }
+            // EqChain with arithmetic expressions — verify each pair numerically
+            // or via ratio algebra.
+            if let ClaimExpr::EqChain { items, .. } = concl {
+                let mut ok = true;
+                for pair in items.windows(2) {
+                    let lv = crate::symbolic::eval_len_expr(&pair[0], facts);
+                    let rv = crate::symbolic::eval_len_expr(&pair[1], facts);
+                    match (lv, rv) {
+                        (Some(a), Some(b)) if (a - b).abs() < 1e-9 => { continue; }
+                        _ => {}
+                    }
+                    // Try ratio-based: Seg(a) = Add(Seg(b), Seg(b)) means a = 2*b,
+                    // which follows from b/a = 1/2.
+                    if let (LenExpr::Seg(a), LenExpr::Add(l, r)) = (&pair[0], &pair[1]) {
+                        if l == r {
+                            let ratio_goal = Claim::ratio_eq(
+                                &RatioExpr::Quot {
+                                    num: RatioAtom::Seg(l.seg()),
+                                    den: RatioAtom::Seg(a.clone()),
+                                },
+                                &RatioExpr::Quot {
+                                    num: RatioAtom::Int(1),
+                                    den: RatioAtom::Int(2),
+                                },
+                            );
+                            if facts.contains(&ratio_goal)
+                                || crate::symbolic::ratio_solves(&ratio_goal, facts)
+                            {
+                                continue;
+                            }
+                        }
+                    }
+                    if let (LenExpr::Add(l, r), LenExpr::Seg(a)) = (&pair[0], &pair[1]) {
+                        if l == r {
+                            let ratio_goal = Claim::ratio_eq(
+                                &RatioExpr::Quot {
+                                    num: RatioAtom::Int(2),
+                                    den: RatioAtom::Int(1),
+                                },
+                                &RatioExpr::Quot {
+                                    num: RatioAtom::Seg(a.clone()),
+                                    den: RatioAtom::Seg(l.seg()),
+                                },
+                            );
+                            if facts.contains(&ratio_goal)
+                                || crate::symbolic::ratio_solves(&ratio_goal, facts)
+                            {
+                                continue;
+                            }
+                        }
+                    }
+                    ok = false;
+                    break;
+                }
+                if ok {
+                    continue;
+                }
+            }
             diags.push(Diagnostic::error(
                 span_of(concl.pos(), expr_len(concl)),
                 "a conclusion must contain at least one claim",
@@ -1765,9 +1872,49 @@ fn check_goals(file: &File, facts: &FactStore, diags: &mut Vec<Diagnostic>) {
             let atoms = claim_atoms(claim);
             let mut missing = Vec::new();
             for a in &atoms {
-                if !facts.contains(a) && !crate::symbolic::numeric_solves(a, facts) {
-                    missing.push(a);
+                if facts.contains(a) || crate::symbolic::numeric_solves(a, facts) {
+                    continue;
                 }
+                // For predicate goals, try all rules for direct derivation.
+                if matches!(a, Claim::PredVal { .. }) {
+                    let facts_all = facts.all();
+                    let mut found = false;
+                    for rule in rule_base() {
+                        if !apply_rule(&rule, &facts_all, &[], a).is_empty() {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if found {
+                        continue;
+                    }
+                    // Targeted forward chaining: derive new facts of the
+                    // same predicate kind, up to 3 rounds.
+                    if let Claim::PredVal { name: ref goal_name, .. } = a {
+                        let mut chain = facts_all;
+                        for _ in 0..3 {
+                            let new = derive_all(&chain, &[]);
+                            let mut added = false;
+                            for f in new {
+                                let keep = match &f {
+                                    Claim::PredVal { name, .. } => name == goal_name,
+                                    _ => false,
+                                };
+                                if keep && !chain.contains(&f) {
+                                    chain.push(f);
+                                    added = true;
+                                }
+                            }
+                            if !added || chain.contains(a) {
+                                break;
+                            }
+                        }
+                        if chain.contains(a) {
+                            continue;
+                        }
+                    }
+                }
+                missing.push(a);
             }
             if !missing.is_empty() {
                 diags.push(

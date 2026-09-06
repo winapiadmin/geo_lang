@@ -11,13 +11,15 @@ fn print_usage() {
          \n\
          USAGE:\n\
          \x20 geo_lang check <file.geo> [ -e:Error1,Error2 ]   check proofs in a file\n\
-         \x20 geo_lang prove <file.geo> [claim]                prove every goal in the file\n\
+         \x20 geo_lang prove <file.geo> [claim] [-disable:Rule1,Rule2]  prove every goal in the file\n\
          \x20 geo_lang help\n\
          \n\
          The checker validates each proof[N] block against the geometry rule\n\
          base and reports errors/warnings with source positions. The -e:\n\
          bypass downgrades the listed error kinds (GoalNotProven,\n\
-         PremiseNotEstablished, WrongResult, ...) to assumptions (warnings).\n"
+         PremiseNotEstablished, WrongResult, ...) to assumptions (warnings).\n\
+         The -disable: flag excludes specific rules from the prover (e.g.\n\
+         -disable:isosceles-altitude,median-midpoint).\n"
     );
 }
 
@@ -33,6 +35,17 @@ fn bypass_names(args: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for a in args {
         if let Some(rest) = a.strip_prefix("-e:") {
+            out.extend(rest.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        }
+    }
+    out
+}
+
+/// Collect the `-disable:Rule1,Rule2` list from the remaining arguments.
+fn disable_rules(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for a in args {
+        if let Some(rest) = a.strip_prefix("-disable:") {
             out.extend(rest.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
         }
     }
@@ -114,7 +127,7 @@ fn right_triangle_ctx(
     None
 }
 
-fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
+fn run_prove(path: &str, goal_arg: Option<&str>, disabled: &[String]) -> ExitCode {
     let (source, src_text) = match read_source(path) {
         Ok(x) => x,
         Err(e) => {
@@ -139,7 +152,17 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
     // the checker; Scope=Local proof internals stay hidden).
     let mut facts = checker::build_facts_from_input(&file);
     let _ = checker::apply_proofs(&file, &mut facts);
-    let rules = rules::rule_base();
+    let mut rules = rules::rule_base();
+    // Filter out disabled rules
+    if !disabled.is_empty() {
+        let disabled_set: std::collections::HashSet<&str> = disabled.iter().map(|s| s.as_str()).collect();
+        let original_len = rules.len();
+        rules.retain(|r| !disabled_set.contains(&*r.id));
+        let removed = original_len - rules.len();
+        if removed > 0 {
+            println!("// Disabled {} rule(s): {}", removed, disabled.join(", "));
+        }
+    }
     let mut any_unproven = false;
 
     // One forward closure shared by every goal (single-claim path uses it too).
@@ -174,10 +197,12 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
             }
             match prover::prove_seeded(goal, &facts, &saturated, &rules) {
                 Some(p) => {
-                    println!("{}: {}", label, display);
-                    println!("chain: {}", prover::render_chain(&p, Some(display)));
-                    println!("tree:");
-                    println!("{}", prover::render_tree(&p, 1, Some(display)));
+                    let tree = prover::render_tree(&p, 0, Some(display));
+                    for line in tree.lines() {
+                        println!("// {}", line);
+                    }
+                    let chain = prover::render_chain(&p, Some(display));
+                    println!("{}", chain);
                 }
                 None => {
                     println!("cannot prove: {}", display);
@@ -542,19 +567,25 @@ fn run_prove(path: &str, goal_arg: Option<&str>) -> ExitCode {
                 }
                 // EqChain goals with compound expressions (law of cosines etc.)
                 if let ast::ClaimExpr::EqChain { items, .. } = claim {
-                    if let Some(deriv) = symbolic::law_of_cosines_derive(items, &goal_facts) {
-                        for d in &deriv {
-                            println!("{}", d);
+                    let display = checker::render_expr(claim);
+                    // Try law of cosines proof
+                    if let Some(p) = symbolic::law_of_cosines_proof(items, &goal_facts) {
+                        let tree = prover::render_tree(&p, 0, Some(&display));
+                        for line in tree.lines() {
+                            println!("// {}", line);
                         }
-                        println!("{}", checker::render_expr(claim));
+                        let chain = prover::render_chain(&p, Some(&display));
+                        println!("{}", chain);
                         continue;
                     }
                     // Rectangle diagonal identity: AE²+BE²+CE²+DE²=AB²+BC².
-                    if let Some(deriv) = symbolic::rectangle_diagonal_derive(items, &goal_facts) {
-                        for d in &deriv {
-                            println!("{}", d);
+                    if let Some(p) = symbolic::rectangle_diagonal_proof(items, &goal_facts) {
+                        let tree = prover::render_tree(&p, 0, Some(&display));
+                        for line in tree.lines() {
+                            println!("// {}", line);
                         }
-                        println!("{}", checker::render_expr(claim));
+                        let chain = prover::render_chain(&p, Some(&display));
+                        println!("{}", chain);
                         continue;
                     }
                     // Numeric evaluation: compute both sides and check equality.
@@ -646,15 +677,17 @@ fn main() -> ExitCode {
             run_check(&path, &bypass)
         }
         "prove" => {
+            let disable = disable_rules(&args[2..]);
             let positional: Vec<&String> =
-                args.iter().skip(2).filter(|a| !a.starts_with("-e:")).collect();
+                args.iter().skip(2).filter(|a| !a.starts_with("-e:") && !a.starts_with("-disable:")).collect();
             if positional.len() < 1 || positional.len() > 2 {
-                eprintln!("usage: geo_lang prove <file.geo> [claim]");
+                eprintln!("usage: geo_lang prove <file.geo> [claim] [-disable:Rule1,Rule2]");
                 return ExitCode::from(2);
             }
             run_prove(
                 positional[0],
                 positional.get(1).map(|s| s.as_str()),
+                &disable,
             )
         }
         "help" | "--help" | "-h" => {

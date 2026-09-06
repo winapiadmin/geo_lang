@@ -39,3 +39,5 @@ prove:
 8. IsParallel(JK,AB)=true
 9. IsParallel(KI,BC)=true
 10. IsCollinear(Q,J,H)=true
+inp[10]:
+Q2=Intersection(Line(H,J),BC)

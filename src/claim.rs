@@ -74,19 +74,15 @@ fn canon_atom(a: &RatioAtom) -> RatioAtom {
     }
 }
 
-/// Canonicalize a ratio expression: normalize segments and invert the
-/// quotient if the denominator sorts before the numerator.
+/// Canonicalize a ratio expression: normalize segments.
+/// Does NOT swap num/den — AB/CD ≠ CD/AB.
 fn canon_ratio(e: &RatioExpr) -> RatioExpr {
     match e {
         RatioExpr::Seg(s) => RatioExpr::Seg(Claim::norm_seg(s)),
         RatioExpr::Quot { num, den } => {
             let n = canon_atom(num);
             let d = canon_atom(den);
-            if atom_key(&d) < atom_key(&n) {
-                RatioExpr::Quot { num: d, den: n }
-            } else {
-                RatioExpr::Quot { num: n, den: d }
-            }
+            RatioExpr::Quot { num: n, den: d }
         }
     }
 }
@@ -150,10 +146,16 @@ impl Claim {
             }
             return r;
         }
-        // Legacy: single-char points concatenated (e.g., "ab")
-        let mut chars: Vec<char> = r.chars().collect();
-        chars.sort_unstable();
-        chars.into_iter().collect()
+        // Only sort purely alphabetic names (single-char points like "ab").
+        // Names with digits (e.g., "bq2" = Segment(B,Q2)) must NOT be sorted,
+        // otherwise "bq2" becomes "2bq" and gets misinterpreted as 2*BQ.
+        if r.chars().all(|c| c.is_alphabetic()) {
+            let mut chars: Vec<char> = r.chars().collect();
+            chars.sort_unstable();
+            chars.into_iter().collect()
+        } else {
+            r
+        }
     }
 
     /// Create a segment key from two point names (orientation-free, supports multi-char).
@@ -258,9 +260,34 @@ impl Claim {
         }
         let args: Vec<String> = match name.as_str() {
             "issimilar" => {
-                // Triangle references in similarity claims are
-                // permutation-free, like triangle equality.
-                args.iter().map(|a| Self::norm_tri(a)).collect()
+                // Similarity is symmetric: sort the pair so A~B == B~A.
+                // Sort points within each triangle so vertex permutations
+                // (ABC == ACB) are equivalent.
+                fn split_tri_points(s: &str) -> Vec<String> {
+                    let s = s.to_lowercase();
+                    let mut result = Vec::new();
+                    let mut i = 0;
+                    while i < s.len() {
+                        let start = i;
+                        if !s[i..].chars().next().unwrap().is_ascii_alphabetic() {
+                            i += 1;
+                            continue;
+                        }
+                        i += 1;
+                        while i < s.len() && s[i..].chars().next().unwrap().is_ascii_digit() {
+                            i += 1;
+                        }
+                        result.push(s[start..i].to_string());
+                    }
+                    if result.len() >= 3 { result } else { vec![s] }
+                }
+                let mut normalized: Vec<String> = args.iter().map(|a| {
+                    let mut pts = split_tri_points(a);
+                    pts.sort();
+                    pts.concat()
+                }).collect();
+                normalized.sort();
+                normalized
             }
             "ismedian" | "isperpendicular" | "isparallel" | "isperpendicularbisector" => {
                 if args.len() == 2 {
@@ -363,7 +390,10 @@ impl Claim {
     /// Normalize a triangle reference: lower-case and sort its vertices so
     /// that any permutation names the same triangle.
     pub fn norm_tri(r: &str) -> String {
-        let mut chars: Vec<char> = r.to_lowercase().chars().collect();
+        let s = r.to_lowercase();
+        // Sort all characters so that any permutation of the same points
+        // produces the same normalized form, e.g. "hbq2" == "hq2b" == "2bhq".
+        let mut chars: Vec<char> = s.chars().collect();
         chars.sort_unstable();
         chars.into_iter().collect()
     }
@@ -371,17 +401,30 @@ impl Claim {
     /// Normalize an angle reference: lower-case, keeping the vertex (middle
     /// letter) in place and sorting the two arms, so `ABC` == `CBA`.
     pub fn norm_angle(r: &str) -> String {
-        let chars: Vec<char> = r.to_lowercase().chars().collect();
-        if chars.len() != 3 {
-            return r.to_lowercase();
+        let s = r.to_lowercase();
+        // Split into component point names.
+        let mut points = Vec::new();
+        let mut i = 0;
+        while i < s.len() {
+            let start = i;
+            if !s[i..].chars().next().unwrap().is_ascii_alphabetic() {
+                i += 1;
+                continue;
+            }
+            i += 1;
+            while i < s.len() && s[i..].chars().next().unwrap().is_ascii_digit() {
+                i += 1;
+            }
+            points.push(s[start..i].to_string());
         }
-        let mut arms = [chars[0], chars[2]];
-        arms.sort_unstable();
-        let mut out = String::with_capacity(3);
-        out.push(arms[0]);
-        out.push(chars[1]);
-        out.push(arms[1]);
-        out
+        if points.len() != 3 {
+            return s;
+        }
+        // Vertex is the middle point; sort the two arms.
+        let vertex = points[1].clone();
+        let mut arms = [points[0].clone(), points[2].clone()];
+        arms.sort();
+        format!("{}{}{}", arms[0], vertex, arms[1])
     }
 
     /// Build an angle-equality claim from raw angle refs such as `ABC`.

@@ -7,6 +7,7 @@ pub mod claim;
 pub mod diag;
 pub mod parser;
 pub mod prover;
+pub mod rule_loader;
 pub mod rules;
 pub mod symbolic;
 pub mod token;
