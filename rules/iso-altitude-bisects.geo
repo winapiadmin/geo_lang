@@ -7,3 +7,9 @@ antecedents:
 requires:
 consequent:
   - IsMedian(F, Seg2(A,B))
+chain:
+  SegEq(Seg2(Z,A), Seg2(Z,B)) &&
+  IsPerpendicular(Seg2(Z,F), Seg2(A,B)) &&
+  On(F, Seg2(A,B))
+  ->
+  IsMedian(F, Seg2(A,B))

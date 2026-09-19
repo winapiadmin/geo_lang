@@ -5,3 +5,7 @@ antecedents:
 requires:
 consequent:
   - SegEq(Seg2(A,B), Seg2(C,D))
+chain:
+  Parallelogram(Q)
+  ->
+  SegEq(Seg2(A,B), Seg2(C,D))

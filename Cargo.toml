@@ -6,3 +6,6 @@ description = "A proof checker and prover for the .geo geometry language"
 
 [profile.release]
 opt-level = 3
+
+[dependencies]
+dashu = "0.6.0"

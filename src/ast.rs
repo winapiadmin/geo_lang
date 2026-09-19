@@ -11,16 +11,17 @@ pub struct Pos {
 
 /// A length expression: either a raw segment reference (`BD`) or a
 /// `Distance(Point, Point)` call. Used on both sides of `=` in claims.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LenExpr {
     Seg(String),
     Distance(String, String),
-    Num(u32),
+    Num(f64),
     Sq(Box<LenExpr>),
     Sqrt(Box<LenExpr>),
     Add(Box<LenExpr>, Box<LenExpr>),
     Sub(Box<LenExpr>, Box<LenExpr>),
     Mul(Box<LenExpr>, Box<LenExpr>),
+    Div(Box<LenExpr>, Box<LenExpr>),
     Trig(String, String),
 }
 
@@ -37,6 +38,7 @@ impl LenExpr {
             LenExpr::Add(l, _) => l.seg(),
             LenExpr::Sub(l, _) => l.seg(),
             LenExpr::Mul(l, _) => l.seg(),
+            LenExpr::Div(l, _) => l.seg(),
             LenExpr::Trig(func, angle) => format!("{}({})", func, angle),
         }
     }
@@ -58,22 +60,18 @@ impl LenExpr {
         matches!(self, LenExpr::Sq(_))
     }
 
-    pub fn numeric(&self) -> Option<u32> {
+    pub fn numeric(&self) -> Option<f64> {
         match self {
             LenExpr::Num(n) => Some(*n),
-            LenExpr::Sq(inner) => inner.numeric().and_then(|n| n.checked_mul(n)),
-            LenExpr::Sqrt(inner) => inner.numeric().and_then(|n| {
-                let sq = (n as f64).sqrt();
-                let rounded = sq.round() as u32;
-                if (sq - rounded as f64).abs() < 1e-9 {
-                    Some(rounded)
-                } else {
-                    None
-                }
-            }),
+            LenExpr::Sq(inner) => inner.numeric().map(|n| n * n),
+            LenExpr::Sqrt(inner) => inner.numeric().map(|n| n.sqrt()),
             LenExpr::Add(l, r) => Some(l.numeric()? + r.numeric()?),
-            LenExpr::Sub(l, r) => l.numeric()?.checked_sub(r.numeric()?),
-            LenExpr::Mul(l, r) => l.numeric()?.checked_mul(r.numeric()?),
+            LenExpr::Sub(l, r) => Some(l.numeric()? - r.numeric()?),
+            LenExpr::Mul(l, r) => Some(l.numeric()? * r.numeric()?),
+            LenExpr::Div(l, r) => {
+                let d = r.numeric()?;
+                if d == 0.0 { None } else { Some(l.numeric()? / d) }
+            }
             _ => None,
         }
     }
@@ -82,7 +80,7 @@ impl LenExpr {
     /// A product of an optional length and an optional `cos(angle)` factor,
     /// used inside a `Sum` claim. `BC` is `{ len: Some(BC), cos: None }`;
     /// `AB*cos(B)` is `{ len: Some(AB), cos: Some("B") }`.
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq)]
     pub struct SumTerm {
         pub len: Option<LenExpr>,
         /// Vertex letter whose cosine to take (in the context triangle).
@@ -225,10 +223,10 @@ pub enum Geom {
 }
 
 /// The radius part of a `Circle` declaration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RadiusSpec {
     /// Numeric radius: `Circle(O, 7)`.
-    Num(u32),
+    Num(f64),
     /// Radius equal to a segment length: `Circle(O, AB)`.
     Seg(String),
     /// Circle through a point: `Circle(O, P)` — radius is OP and P lies on it.
@@ -333,7 +331,7 @@ impl InputStmt {
 }
 
 /// An evaluation request inside a goal: `Calc(AB)` or `Calc(Angle(ABC))`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CalcSpec {
     /// Print the length of a segment / distance expression.
     Len(LenExpr),

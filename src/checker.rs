@@ -65,19 +65,37 @@ pub fn claim_atoms(expr: &ClaimExpr) -> Vec<Claim> {
                 let l = &pair[0];
                 let r = &pair[1];
                 if let Some(n) = l.numeric() {
+                    let n_u32 = n.round() as u32;
                     // `<number> = <len>`: the numeric side is on the left.
-                    if r.squared() {
-                        out.push(Claim::sq_eq(&r.seg(), n));
-                    } else {
-                        out.push(Claim::len_eq(&r.seg(), n));
+                    // Only create a fact for simple numeric literals; compound
+                    // expressions (Div, Sqrt, Sq, etc.) that aren't integers
+                    // lose precision when rounded to u32 (e.g. 30/7 → 4).
+                    let lhs_is_literal = matches!(l, LenExpr::Num(..));
+                    let is_integer = (n - n_u32 as f64).abs() < 1e-9;
+                    if lhs_is_literal || is_integer {
+                        if r.squared() {
+                            out.push(Claim::sq_eq(&r.seg(), n_u32));
+                        } else if matches!(r, LenExpr::Seg(..) | LenExpr::Distance(..)) {
+                            out.push(Claim::len_eq(&r.seg(), n_u32));
+                        }
                     }
+                    // Trig values (sin/cos/tan) produce non-integer values;
+                    // don't create LenEq — they're verified numerically.
                 } else if let Some(n) = r.numeric() {
                     // `<len> = <number>`: a numeric length fact.
-                    if l.squared() {
-                        out.push(Claim::sq_eq(&l.seg(), n));
-                    } else {
-                        out.push(Claim::len_eq(&l.seg(), n));
+                    // Only produce a LenEq when the RHS is a simple numeric
+                    // literal — compound expressions (Div, Add, etc.) lose
+                    // precision when rounded to u32 (e.g. AE=30/7 → 4).
+                    let rhs_is_literal = matches!(r, LenExpr::Num(..));
+                    if rhs_is_literal {
+                        if l.squared() {
+                            out.push(Claim::sq_eq(&l.seg(), n.round() as u32));
+                        } else if matches!(l, LenExpr::Seg(..) | LenExpr::Distance(..)) {
+                            out.push(Claim::len_eq(&l.seg(), n.round() as u32));
+                        }
                     }
+                    // Trig values (sin/cos/tan) produce non-integer values;
+                    // don't create LenEq — they're verified numerically.
                 } else if l.squared() && r.squared() {
                     // `X^2 = Y^2`: equal squared lengths imply equal lengths
                     // (distances are nonnegative).
@@ -86,8 +104,8 @@ pub fn claim_atoms(expr: &ClaimExpr) -> Vec<Claim> {
                     // When either side is an arithmetic expression (Add/Sub/Mul),
                     // don't produce a SegEq — it would lose information.
                     // These are handled by numeric verification in process_chain.
-                    let has_arith = matches!(l, LenExpr::Add(..) | LenExpr::Sub(..) | LenExpr::Mul(..))
-                        || matches!(r, LenExpr::Add(..) | LenExpr::Sub(..) | LenExpr::Mul(..));
+                    let has_arith = matches!(l, LenExpr::Add(..) | LenExpr::Sub(..) | LenExpr::Mul(..) | LenExpr::Div(..) | LenExpr::Sqrt(..) | LenExpr::Sq(..))
+                        || matches!(r, LenExpr::Add(..) | LenExpr::Sub(..) | LenExpr::Mul(..) | LenExpr::Div(..) | LenExpr::Sqrt(..) | LenExpr::Sq(..));
                     if !has_arith {
                         out.push(Claim::seg_eq(&l.seg(), &r.seg()));
                     }
@@ -166,6 +184,7 @@ const KNOWN_PREDS: &[&str] = &[
     "isaltitude", "iscircumcenter", "isincenter", "isorthocenter",
     "iscentroid", "isperpendicularbisector", "isnone", "isoscelesat",
     "on", "onsamecircle", "oncircle", "iscirclecenter", "isrectangle",
+    "intersection",
     "equals", "rightat",
 ];
 
@@ -228,6 +247,7 @@ fn len_expr_len(e: &LenExpr) -> usize {
         LenExpr::Add(l, r) => len_expr_len(l) + 1 + len_expr_len(r),
         LenExpr::Sub(l, r) => len_expr_len(l) + 1 + len_expr_len(r),
         LenExpr::Mul(l, r) => len_expr_len(l) + 1 + len_expr_len(r),
+        LenExpr::Div(l, r) => len_expr_len(l) + 1 + len_expr_len(r),
         LenExpr::Trig(func, angle) => func.len() + 1 + angle.len() + 1,
     }
 }
@@ -303,7 +323,8 @@ pub fn apply_input_statements(facts: &mut FactStore, stmts: &[&InputStmt]) {
     for stmt in stmts {
         process_input(stmt, facts, &mut Vec::new(), &known, &circles);
     }
-    seg_eq_closure(facts);
+    derive_global_facts(facts);
+    derive_perpendicular_foot_midpoints(facts);
 }
 
 /// Display string for a length expression (used by Calc goals).
@@ -1016,11 +1037,12 @@ fn process_input(
                 }
                 if let Some(n) = l.numeric().or(r.numeric()) {
                     // `AD=3` / `Distance(A,H)=7`: a numeric length fact.
+                    let n_u32 = n.round() as u32;
                     let seg = if l.is_num() { r.seg() } else { l.seg() };
                     if l.squared() || r.squared() {
-                        facts.add(Claim::sq_eq(&seg, n), Origin::Input);
+                        facts.add(Claim::sq_eq(&seg, n_u32), Origin::Input);
                     } else {
-                        facts.add(Claim::len_eq(&seg, n), Origin::Input);
+                        facts.add(Claim::len_eq(&seg, n_u32), Origin::Input);
                     }
                 } else {
                     facts.add(
@@ -1037,6 +1059,22 @@ fn process_input(
         }
         InputStmt::PredFact { name, args, value, pos } => {
             facts.add(Claim::pred(name, args, value.clone()), Origin::Input);
+            // Auto-create Triangle fact for rightat/obtuseat/isoscelesat predicates
+            // so trig evaluation can find the triangle.
+            if (name.eq_ignore_ascii_case("rightat")
+                || name.eq_ignore_ascii_case("obtuseat")
+                || name.eq_ignore_ascii_case("isoscelesat"))
+                && args.len() == 1
+                && args[0].len() == 3
+            {
+                let tri = Claim::norm_ref(&args[0]);
+                if !facts.contains(&Claim::pred("triangle", &[tri.clone()], Value::Bool(true))) {
+                    facts.add(
+                        Claim::pred("triangle", &[tri], Value::Bool(true)),
+                        Origin::Input,
+                    );
+                }
+            }
             // `IsRectangle(A,B,C,D)=true` (vertices in order): derive the
             // side structure — opposite sides parallel, adjacent sides
             // perpendicular — so the rule base can reason about it.
@@ -1318,7 +1356,7 @@ fn process_construction(
                                     Claim::PredVal {
                                         name: "rightat".into(),
                                         args: vec![tri.clone()],
-                                        value: Value::Point(n_norm.to_uppercase()),
+                                        value: Value::Point(n_norm.clone()),
                                     },
                                     Origin::Input,
                                 );
@@ -1626,6 +1664,23 @@ fn process_chain(
                 ));
                 return;
             }
+            // EqChain with arithmetic expressions — verify each pair numerically.
+            if let ClaimExpr::EqChain { items, .. } = expr {
+                let mut ok = true;
+                for pair in items.windows(2) {
+                    let lv = crate::symbolic::eval_len_expr(&pair[0], facts);
+                    let rv = crate::symbolic::eval_len_expr(&pair[1], facts);
+                    match (lv, rv) {
+                        (Some(a), Some(b)) if (a - b).abs() < 1e-9 => { continue; }
+                        _ => {}
+                    }
+                    ok = false;
+                    break;
+                }
+                if ok {
+                    return;
+                }
+            }
             diags.push(Diagnostic::error(
                 span_of(expr.pos(), expr_len(expr)),
                 "a proof step must conclude at least one claim",
@@ -1642,15 +1697,38 @@ fn process_chain(
     // Premise of the chain must be established.
     let premise_atoms = claim_atoms(&claims[0]);
     for p in &premise_atoms {
-        if !facts.contains(p) {
-            diags.push(
-                Diagnostic::error(
-                    span_of(claims[0].pos(), expr_len(&claims[0])),
-                    format!("Premise not established: {}", p),
-                )
-                .with_kind("premise-not-established"),
-            );
+        // Reflexive equalities (e.g. SegEq("bc","bc")) are trivially true.
+        let is_reflexive = match p {
+            Claim::SegEq(a, b) | Claim::TriEq(a, b) | Claim::AngleEq(a, b) => a == b,
+            _ => false,
+        };
+        if is_reflexive {
+            continue;
         }
+        // SegEq(a,b) is established if a and b have the same length.
+        let equal_len = if let Claim::SegEq(a, b) = p {
+            let la = crate::symbolic::solve_len(a, facts);
+            let lb = crate::symbolic::solve_len(b, facts);
+            la.is_some() && lb.is_some() && la == lb
+        } else {
+            false
+        };
+        if facts.contains(p) || equal_len {
+            continue;
+        }
+        // Ratio equalities can be verified numerically from segment lengths.
+        if let Claim::RatioEq(_, _) = p {
+            if crate::symbolic::ratio_solves(p, facts) {
+                continue;
+            }
+        }
+        diags.push(
+            Diagnostic::error(
+                span_of(claims[0].pos(), expr_len(&claims[0])),
+                format!("Premise not established: {}", p),
+            )
+            .with_kind("premise-not-established"),
+        );
     }
 
     for i in 0..claims.len() - 1 {
@@ -1762,6 +1840,28 @@ fn establish(
     proof_index: u32,
     step_num: usize,
 ) {
+    // Reflexive equalities are trivially true (e.g., TriEq("abc","abc")).
+    match goal {
+        Claim::TriEq(a, b) if a == b => {
+            facts.add(goal.clone(), Origin::Proof(proof_index, step_num));
+            return;
+        }
+        Claim::SegEq(a, b) if a == b => {
+            facts.add(goal.clone(), Origin::Proof(proof_index, step_num));
+            return;
+        }
+        // SegEq(a,b) is established if a and b have the same numeric length.
+        Claim::SegEq(a, b) => {
+            let la = crate::symbolic::solve_len(a, facts);
+            let lb = crate::symbolic::solve_len(b, facts);
+            if la.is_some() && lb.is_some() && la == lb {
+                facts.add(goal.clone(), Origin::Proof(proof_index, step_num));
+                return;
+            }
+        }
+        _ => {}
+    }
+
     if facts.contains(goal) {
         let note = match facts.get(goal).map(|f| f.origin.clone()) {
             Some(Origin::Proof(i, _)) => {
@@ -1792,6 +1892,14 @@ fn establish(
     if !applied && crate::symbolic::numeric_solves(goal, facts) {
         applied = true;
     }
+    // Ratio equalities verified numerically from segment lengths.
+    if !applied {
+        if let Claim::RatioEq(..) = goal {
+            if crate::symbolic::ratio_solves(goal, facts) {
+                applied = true;
+            }
+        }
+    }
 
     if applied {
         facts.add(goal.clone(), Origin::Proof(proof_index, step_num));
@@ -1800,10 +1908,15 @@ fn establish(
 
     // Wrong result: no rule derives the claimed conclusion.
     let ante_str = render_conjunction(extra);
+    let msg = if ante_str.is_empty() {
+        format!("Wrong result: {}", goal)
+    } else {
+        format!("Wrong result: {} -> {}", ante_str, goal)
+    };
     diags.push(
         Diagnostic::error(
             span_of(pos, len),
-            format!("Wrong result: {} -> {}", ante_str, goal),
+            msg,
         )
         .with_kind("wrong-result")
         .with_hint(hint_message(goal, &facts_all, extra)),
@@ -1815,6 +1928,9 @@ fn establish(
 }
 
 fn render_conjunction(claims: &[Claim]) -> String {
+    if claims.is_empty() {
+        return String::new();
+    }
     if claims.len() == 1 {
         return claims[0].to_string();
     }
@@ -1834,7 +1950,20 @@ fn hint_message(goal: &Claim, facts: &[Claim], extra: &[Claim]) -> String {
 // ---- goals ----
 
 fn check_goals(file: &File, facts: &FactStore, diags: &mut Vec<Diagnostic>) {
+    let known = known_perp_lines(file);
+    let circles = known_circles(file);
     for goal in &file.goals {
+        // Build per-goal fact store: base facts + all scoped inputs up to this goal.
+        let mut goal_facts = FactStore::new();
+        for f in facts.all() {
+            goal_facts.add(f, Origin::Input);
+        }
+        for (idx, stmt) in &file.scoped_input {
+            if *idx <= goal.index {
+                process_input(stmt, &mut goal_facts, diags, &known, &circles);
+            }
+        }
+        let facts = &goal_facts;
         if let Some(claim) = &goal.claim {
             if let ClaimExpr::EqChain { items, .. } = claim {
                 if eq_chain_mixed(items) {
@@ -1846,6 +1975,17 @@ fn check_goals(file: &File, facts: &FactStore, diags: &mut Vec<Diagnostic>) {
                 }
                 // Evaluate compound EqChain items numerically.
                 if items.len() >= 2 {
+                    // Try exact rational comparison first.
+                    let rat_vals: Vec<Option<crate::symbolic::EXRat>> = items
+                        .iter()
+                        .map(|e| crate::symbolic::eval_len_expr_ratio(e, facts))
+                        .collect();
+                    if rat_vals.iter().all(|v| v.is_some())
+                        && rat_vals[1..].iter().all(|v| *v.as_ref().unwrap() == *rat_vals[0].as_ref().unwrap())
+                    {
+                        continue;
+                    }
+                    // Fall back to f64 comparison for trig/irrationals.
                     let vals: Vec<Option<f64>> = items
                         .iter()
                         .map(|e| crate::symbolic::eval_len_expr(e, facts))
@@ -1888,19 +2028,15 @@ fn check_goals(file: &File, facts: &FactStore, diags: &mut Vec<Diagnostic>) {
                     if found {
                         continue;
                     }
-                    // Targeted forward chaining: derive new facts of the
-                    // same predicate kind, up to 3 rounds.
-                    if let Claim::PredVal { name: ref goal_name, .. } = a {
+                    // Forward chaining: iteratively derive new facts,
+                    // up to 3 rounds, to bridge multi-step chains.
+                    {
                         let mut chain = facts_all;
                         for _ in 0..3 {
                             let new = derive_all(&chain, &[]);
                             let mut added = false;
                             for f in new {
-                                let keep = match &f {
-                                    Claim::PredVal { name, .. } => name == goal_name,
-                                    _ => false,
-                                };
-                                if keep && !chain.contains(&f) {
+                                if !chain.contains(&f) {
                                     chain.push(f);
                                     added = true;
                                 }
@@ -1912,6 +2048,15 @@ fn check_goals(file: &File, facts: &FactStore, diags: &mut Vec<Diagnostic>) {
                         if chain.contains(a) {
                             continue;
                         }
+                    }
+                }
+                // For SegEq/RatioEq goals, try forward chaining to derive
+                // intermediate RatioEq facts, then re-check numeric_solves.
+                if matches!(a, Claim::SegEq(..) | Claim::RatioEq(..)) {
+                    let rules = rule_base();
+                    let saturated = crate::prover::forward_saturate(facts, &rules);
+                    if crate::symbolic::numeric_solves(a, &saturated) {
+                        continue;
                     }
                 }
                 missing.push(a);
@@ -1941,6 +2086,7 @@ pub fn render_len_expr(e: &LenExpr) -> String {
         LenExpr::Add(l, r) => format!("{}+{}", render_len_expr(l), render_len_expr(r)),
         LenExpr::Sub(l, r) => format!("{}-{}", render_len_expr(l), render_len_expr(r)),
         LenExpr::Mul(l, r) => format!("{}*{}", render_len_expr(l), render_len_expr(r)),
+        LenExpr::Div(l, r) => format!("{} / {}", render_len_expr(l), render_len_expr(r)),
         LenExpr::Trig(func, angle) => format!("{}({})", func, angle.to_uppercase()),
     }
 }
@@ -2048,9 +2194,6 @@ pub fn atom_display_strings(expr: &ClaimExpr) -> Vec<String> {
         _ => vec![render_expr(expr)],
     }
 }
-
-
-
 
 
 

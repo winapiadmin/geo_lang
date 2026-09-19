@@ -136,7 +136,7 @@ impl Parser {
                         && matches!(line.toks[4].kind, TokKind::Symbol(':'))
                     {
                         if let TokKind::Number(n) = line.toks[2].kind {
-                            scoped = Some(n);
+                            scoped = Some(n.round() as u32);
                         }
                         continue;
                     }
@@ -693,7 +693,7 @@ impl Parser {
         k += 1;
         expect_symbol(toks, &mut k, '[')?;
         let index = match &toks[k].kind {
-            TokKind::Number(n) => *n,
+            TokKind::Number(n) => *n as u32,
             _ => return self.err(pos_of(&toks[k]), "expected input index"),
         };
         k += 1;
@@ -724,7 +724,7 @@ impl Parser {
         let toks = &line.toks;
         let mut k = 0;
         let index = match &toks[k].kind {
-            TokKind::Number(n) => *n,
+            TokKind::Number(n) => *n as u32,
             _ => return self.err(pos, "expected goal number"),
         };
         k += 1;
@@ -804,7 +804,7 @@ impl Parser {
         k += 1;
         expect_symbol(toks, &mut k, '[')?;
         let index = match &toks[k].kind {
-            TokKind::Number(n) => *n,
+            TokKind::Number(n) => *n as u32,
             _ => return self.err(pos_of(&toks[k]), "expected proof index"),
         };
         k += 1;
@@ -840,7 +840,7 @@ impl Parser {
         k += 1;
         expect_symbol(toks, &mut k, '[')?;
         let index = match &toks[k].kind {
-            TokKind::Number(n) => *n,
+            TokKind::Number(n) => *n as u32,
             _ => return self.err(pos_of(&toks[k]), "expected proof index"),
         };
         k += 1;
@@ -981,10 +981,23 @@ impl Parser {
         let mut len: Option<LenExpr> = None;
         let mut cos_angle: Option<String> = None;
         loop {
-            // Product separator.
+            // Product separator: `*`
             if let Some(t) = toks.get(*k) {
                 if is_symbol(t, '*') {
                     *k += 1;
+                    continue;
+                }
+            }
+            // Division: `/`  — combine with existing length via Div.
+            if let Some(t) = toks.get(*k) {
+                if is_symbol(t, '/') {
+                    *k += 1;
+                    let right = self.parse_len_expr(toks, k)?;
+                    if let Some(left) = len.take() {
+                        len = Some(LenExpr::Div(Box::new(left), Box::new(right)));
+                    } else {
+                        len = Some(right);
+                    }
                     continue;
                 }
             }
@@ -992,10 +1005,12 @@ impl Parser {
             if let Some(t) = toks.get(*k) {
                 if let TokKind::Ident(id) = &t.kind {
                     if !id.eq_ignore_ascii_case("cos") {
-                        if len.is_some() {
-                            return self.err(pos_of(t), "unexpected second length factor");
+                        let new_len = self.parse_len_expr(toks, k)?;
+                        if let Some(existing) = len.take() {
+                            len = Some(LenExpr::Mul(Box::new(existing), Box::new(new_len)));
+                        } else {
+                            len = Some(new_len);
                         }
-                        len = Some(self.parse_len_expr(toks, k)?);
                         continue;
                     }
                 }
@@ -1040,25 +1055,46 @@ impl Parser {
         };
         *k += 1;
 
-        // Linear trig form: `BC = AB*cos(B) + AC*cos(C)` (a `*` or `cos`
-        // appears on the right-hand side of `=`).
-        if *k < toks.len() && is_symbol(&toks[*k], '=') {
-            // Only scan up to the next `->` arrow so that downstream chain
-            // segments (e.g. `-> AE^2+BE^2+CE^2+DE^2=4*AE^2`) don't trigger
-            // the trig heuristic for the current segment.
-            let arrow_pos = toks[*k + 1..]
-                .iter()
-                .position(|t| t.kind == TokKind::Arrow)
-                .map(|p| *k + 1 + p)
-                .unwrap_or(toks.len());
-            let rest_is_trig = toks[*k + 1..arrow_pos].windows(2).any(|w| {
+        // Linear trig form: `BC = AB*cos(B) + AC*cos(C)` or `AB*cos(B) = ...`
+        // (a `*` or `cos` appears near `=`).
+        let has_eq = *k < toks.len() && is_symbol(&toks[*k], '=');
+        let has_prefix_cos = *k + 2 < toks.len()
+            && is_symbol(&toks[*k], '*')
+            && matches!(&toks[*k + 1].kind, TokKind::Ident(id) if id.eq_ignore_ascii_case("cos"));
+        // For prefix_cos, verify `=` actually follows `*cos(...)` before committing.
+        let prefix_cos_eq = has_prefix_cos && {
+            let mut peek = *k + 2; // skip `*cos`
+            if peek < toks.len() && is_symbol(&toks[peek], '(') {
+                peek += 1; // skip `(`
+                while peek < toks.len() && !is_symbol(&toks[peek], ')') {
+                    peek += 1;
+                }
+                peek += 1; // skip `)`
+                peek < toks.len() && is_symbol(&toks[peek], '=')
+            } else {
+                false
+            }
+        };
+        if has_eq || prefix_cos_eq {
+            let scan_start = if has_eq { *k + 1 } else { *k };
+            let arrow_pos = scan_start
+                + toks[scan_start..]
+                    .iter()
+                    .position(|t| t.kind == TokKind::Arrow)
+                    .unwrap_or(toks.len() - scan_start);
+            let rest_is_trig = toks[scan_start..arrow_pos].windows(2).any(|w| {
                 matches!(&w[0].kind, TokKind::Ident(id) if id.eq_ignore_ascii_case("cos"))
                     || is_symbol(&w[0], '*')
                     || is_symbol(&w[1], '*')
             });
             if rest_is_trig {
+                if prefix_cos_eq {
+                    *k += 2; // skip `*cos`
+                    expect_symbol(toks, k, '(')?;
+                    let _v = expect_ident(toks, k)?.to_lowercase();
+                    expect_symbol(toks, k, ')')?;
+                }
                 expect_symbol(toks, k, '=')?;
-                // The identifier already consumed (`name`) is the left side.
                 let lhs = vec![crate::ast::SumTerm {
                     len: Some(LenExpr::Seg(name)),
                     cos_angle: None,
@@ -1110,6 +1146,30 @@ impl Parser {
                 self.parse_eq_chain_rest(toks, k, &mut items)?;
                 return Ok(ClaimExpr::EqChain { items, pos });
             }
+            // sin/cos/tan/arccos/arcsin/arctan length expressions
+            if name == "sin" || name == "cos" || name == "tan"
+                || name == "arccos" || name == "arcsin" || name == "arctan"
+            {
+                *k += 1;
+                // Handle both sin(X) and sin(Angle(X)) syntax
+                let arg = if is_ident_word(&toks[*k], "angle")
+                    && *k + 1 < toks.len()
+                    && is_symbol(&toks[*k + 1], '(')
+                {
+                    *k += 2; // skip "angle" and "("
+                    let inner = expect_ident(toks, k)?.to_lowercase();
+                    expect_symbol(toks, k, ')')?;
+                    inner
+                } else {
+                    expect_ident(toks, k)?.to_lowercase()
+                };
+                expect_symbol(toks, k, ')')?;
+                let base = self.parse_sq_suffix(toks, k, LenExpr::Trig(name, arg))?;
+                let first = self.parse_len_binop(toks, k, base)?;
+                let mut items = vec![first];
+                self.parse_eq_chain_rest(toks, k, &mut items)?;
+                return Ok(ClaimExpr::EqChain { items, pos });
+            }
             // predicate call
             *k += 1;
             let mut args = Vec::new();
@@ -1122,17 +1182,7 @@ impl Parser {
                     expect_symbol(toks, k, ')')?;
                     args.push(inner);
                 } else {
-                    // Split multi-char segment refs like `P1-P2` into two args.
-                    if a.contains('-') {
-                        let parts: Vec<&str> = a.split('-').collect();
-                        for p in parts {
-                            if !p.is_empty() {
-                                args.push(p.to_string());
-                            }
-                        }
-                    } else {
-                        args.push(a);
-                    }
+                    args.push(a);
                 }
                 if *k < toks.len() && is_symbol(&toks[*k], ',') {
                     *k += 1;
@@ -1188,7 +1238,8 @@ impl Parser {
 
         // chained length equality: lhs = rhs = ...
         let base = self.parse_sq_suffix(toks, k, LenExpr::Seg(name))?;
-        let first = self.parse_len_binop(toks, k, base)?;
+        let first = self.parse_len_mul(toks, k, base)?;
+        let first = self.parse_len_binop(toks, k, first)?;
         let mut items = vec![first];
         self.parse_eq_chain_rest(toks, k, &mut items)?;
         // A two-term equality of three-character references denotes triangle
@@ -1241,7 +1292,7 @@ impl Parser {
                 msg: "expected `2` after `^`".into(),
             })?;
             match &t2.kind {
-                TokKind::Number(2) => {
+                TokKind::Number(n) if (*n - 2.0).abs() < 1e-9 => {
                     *k += 1;
                     Ok(LenExpr::Sq(Box::new(base)))
                 }
@@ -1286,7 +1337,18 @@ impl Parser {
                         || name == "arccos" || name == "arcsin" || name == "arctan"
                     {
                         *k += 1;
-                        let arg = expect_ident(toks, k)?.to_lowercase();
+                        // Handle both sin(X) and sin(Angle(X)) syntax
+                        let arg = if is_ident_word(&toks[*k], "angle")
+                            && *k + 1 < toks.len()
+                            && is_symbol(&toks[*k + 1], '(')
+                        {
+                            *k += 2; // skip "angle" and "("
+                            let inner = expect_ident(toks, k)?.to_lowercase();
+                            expect_symbol(toks, k, ')')?;
+                            inner
+                        } else {
+                            expect_ident(toks, k)?.to_lowercase()
+                        };
                         expect_symbol(toks, k, ')')?;
                         LenExpr::Trig(name, arg)
                     } else {
@@ -1351,7 +1413,7 @@ impl Parser {
         }
     }
 
-    /// Parse optional `*` chains after a length expression (higher precedence
+    /// Parse optional `*`/`/` chains after a length expression (higher precedence
     /// than `+`/`-`).
     fn parse_len_mul(
         &self,
@@ -1366,6 +1428,11 @@ impl Parser {
             *k += 1;
             let right = self.parse_len_expr(toks, k)?;
             let node = LenExpr::Mul(Box::new(left), Box::new(right));
+            self.parse_len_mul(toks, k, node)
+        } else if let TokKind::Symbol('/') = &toks[*k].kind {
+            *k += 1;
+            let right = self.parse_len_expr(toks, k)?;
+            let node = LenExpr::Div(Box::new(left), Box::new(right));
             self.parse_len_mul(toks, k, node)
         } else {
             Ok(left)
@@ -1386,7 +1453,11 @@ impl Parser {
             }
             TokKind::Number(n) => {
                 *k += 1;
-                Ok(RatioAtom::Int(*n))
+                let val = n.round() as u32;
+                if (n - val as f64).abs() > 1e-9 {
+                    return self.err(pos, "ratios require integer values (use 1/2 not 0.5)");
+                }
+                Ok(RatioAtom::Int(val))
             }
             _ => self.err(pos, "expected a segment reference or number in a ratio"),
         }
@@ -1402,10 +1473,10 @@ impl Parser {
         } else {
             match num {
                 RatioAtom::Seg(s) => Ok(RatioExpr::Seg(s)),
-                RatioAtom::Int(_) => self.err(
-                    pos_of(&toks[(*k).saturating_sub(1)]),
-                    "a bare number cannot stand alone as a ratio",
-                ),
+                RatioAtom::Int(n) => Ok(RatioExpr::Quot {
+                    num: RatioAtom::Int(n),
+                    den: RatioAtom::Int(1),
+                }),
             }
         }
     }
@@ -1550,6 +1621,10 @@ fn parse_value_at(toks: &[Token], k: &mut usize) -> Result<Value, ParseError> {
             *k += 1;
             Ok(v)
         }
+        TokKind::Number(n) => {
+            *k += 1;
+            Ok(Value::Point(n.to_string()))
+        }
         TokKind::Symbol('?') => {
             *k += 1;
             Ok(Value::Unknown)
@@ -1588,7 +1663,3 @@ fn is_goal_line(line: &Line) -> bool {
         && matches!(&line.toks[0].kind, TokKind::Number(_))
         && is_symbol(&line.toks[1], '.')
 }
-
-
-
-

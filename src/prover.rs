@@ -82,7 +82,13 @@ fn is_degenerate(c: &Claim) -> bool {
 /// Derive the closure of `facts` under `rules` (sound forward chaining), used
 /// to seed the backward prover with facts that follow directly from the input.
 pub fn forward_saturate(facts: &FactStore, rules: &[Rule]) -> FactStore {
-    saturate_toward(facts, rules, None)
+    saturate_toward(facts, rules, None, None)
+}
+
+/// Forward saturate with per-depth fact dumping.
+/// When `dump_depth` is `Some(n)`, prints facts after each saturation depth up to `n`.
+pub fn forward_saturate_d(facts: &FactStore, rules: &[Rule], dump_depth: Option<usize>) -> FactStore {
+    saturate_toward(facts, rules, None, dump_depth)
 }
 
 /// Like [`forward_saturate`] but stops as soon as `goal` becomes derivable.
@@ -90,7 +96,7 @@ pub fn forward_saturate(facts: &FactStore, rules: &[Rule]) -> FactStore {
 /// Semi-naive evaluation: after the first pass, a rule application only
 /// contributes when at least one of its matches involves a fact derived in
 /// the previous pass, which keeps later passes proportional to the delta.
-fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> FactStore {
+fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>, dump_depth: Option<usize>) -> FactStore {
     let mut store = FactStore::new();
     let mut delta: Vec<Claim> = Vec::new();
     for f in facts.all() {
@@ -104,6 +110,13 @@ fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> F
         }
     }
     let base = facts.all().len();
+
+    if dump_depth.is_some() {
+        println!("=== depth 0: {} base facts ===", store.all().len());
+        for c in store.all() {
+            println!("  {}", c);
+        }
+    }
 
     // Join `rule` against the store; each binding remembers how many of its
     // antecedent matches involved a *novel* (delta) fact. Facts are bucketed
@@ -208,8 +221,8 @@ fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> F
         use crate::rules::PClaim as P;
         let keys: Vec<String> = match ant {
             P::SegEq(_, _) => vec!["segeq".into()],
-            P::PredVal(n, a, _) => vec![format!("p|{}|{}", n, a.len())],
-            P::PredAt(n, a, _) => vec![format!("p|{}|{}", n, a.len() + 0)],
+            P::PredVal(n, a, _) => vec![format!("p|{}|{}", n.to_lowercase(), a.len())],
+            P::PredAt(n, a, _) => vec![format!("p|{}|{}", n.to_lowercase(), a.len())],
             P::On(_, _) => vec!["on".into()],
             P::IsoscelesAt(_, _) => vec!["iso".into()],
             P::TriEq(_, _) => vec!["trieq".into()],
@@ -261,6 +274,14 @@ fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>) -> F
         }
         delta = new_delta;
         passes += 1;
+        if let Some(max_d) = dump_depth {
+            if passes <= max_d {
+                println!("=== depth {}: {} new facts, {} total ===", passes, delta.len(), store.all().len());
+                for c in &delta {
+                    println!("  + {}", c);
+                }
+            }
+        }
         if store.all().len() > base + MAX_SATURATION {
             break;
         }
@@ -387,8 +408,13 @@ pub fn prove(
     }
 
 
-    let saturated = saturate_toward(facts, rules, Some(goal));
-    prove_inner(goal, &saturated, rules, facts)
+    let saturated = saturate_toward(facts, rules, Some(goal), None);
+    // Also try numeric proof against the saturated store, which may contain
+    // RatioEq facts derived by forward chaining that the base facts lack.
+    if let Some(p) = crate::symbolic::numeric_proof(goal, &saturated) {
+        return Some(p);
+    }
+    prove_inner(goal, &saturated, rules, facts, None)
 }
 
 /// Prove `goal` against a pre-computed saturated store (see
@@ -399,12 +425,17 @@ pub fn prove_seeded(
     facts: &FactStore,
     saturated: &FactStore,
     rules: &[Rule],
+    disabled: Option<&std::collections::HashSet<&str>>,
 ) -> Option<Proof> {
-    // Numeric / coordinate derivations run against the base facts.
+    // Numeric / coordinate derivations run against the base facts first.
     if let Some(p) = crate::symbolic::numeric_proof(goal, facts) {
         return Some(p);
     }
-    prove_inner(goal, saturated, rules, facts)
+    // Also try against the saturated store for RatioEq-derived SegEq.
+    if let Some(p) = crate::symbolic::numeric_proof(goal, saturated) {
+        return Some(p);
+    }
+    prove_inner(goal, saturated, rules, facts, disabled)
 }
 
 /// Join-based backward chaining: structural antecedents must match facts;
@@ -420,8 +451,9 @@ fn prove_inner(
     saturated: &FactStore,
     rules: &[Rule],
     base: &FactStore,
+    disabled: Option<&std::collections::HashSet<&str>>,
 ) -> Option<Proof> {
-    prove_rec(goal, saturated, rules, base, PROOF_DEPTH, &[])
+    prove_rec(goal, saturated, rules, base, PROOF_DEPTH, &[], disabled)
 }
 
 fn prove_rec(
@@ -431,6 +463,7 @@ fn prove_rec(
     base: &FactStore,
     depth: usize,
     ancestors: &[Claim],
+    disabled: Option<&std::collections::HashSet<&str>>,
 ) -> Option<Proof> {
     // Cycle detection: if this goal is already an ancestor in the current
     // proof branch, we're in a loop — treat as a leaf or fail.
@@ -460,6 +493,127 @@ fn prove_rec(
         v
     };
     for rule in rules {
+        // Disabled rules are excluded from the search. Any proof found below
+        // must therefore come from facts or other enabled rules; never
+        // fabricate a proof from the disabled rule's own premises.
+        let is_disabled = disabled.map_or(false, |d| d.contains(rule.id));
+        if is_disabled {
+            if let Some(chain_str) = rule.chain {
+                let steps = match crate::rule_loader::parse_fallback_chain(chain_str) {
+                    Ok(steps) => steps,
+                    Err(error) => {
+                        eprintln!("fallback parse failed for {}: {}", rule.id, error);
+                        continue;
+                    }
+                };
+                if steps.is_empty() {
+                    continue;
+                }
+                let mut matches = Vec::new();
+                let mut initial = match_pat(goal, &rule.consequent, &HashMap::new());
+                let candidates = saturated.all();
+                for pattern in rule.antecedents.iter().chain(rule.requires.iter()) {
+                    let mut next = Vec::new();
+                    for bind in &initial {
+                        for fact in &candidates {
+                            next.extend(match_pat(fact, pattern, bind));
+                        }
+                    }
+                    initial = next;
+                    if initial.is_empty() {
+                        break;
+                    }
+                }
+                for bind in initial {
+                    matches.extend(match_pat(goal, &steps[steps.len() - 1].claims[0], &bind));
+                }
+                for bind in matches {
+                    let mut proofs = Vec::new();
+                    let mut chain_facts = base.clone();
+                    let mut chain_saturated = saturated.clone();
+                    let mut valid = true;
+                    for step in &steps[..steps.len() - 1] {
+                        for pattern in &step.claims {
+                            let claim = instantiate(pattern, &bind);
+                            if claim.has_unbound() {
+                                valid = false;
+                                break;
+                            }
+                            let Some(proof) = prove_rec(
+                                &claim,
+                                &chain_saturated,
+                                rules,
+                                &chain_facts,
+                                depth.saturating_sub(1),
+                                &ancestors,
+                                disabled,
+                            ) else {
+                                valid = false;
+                                break;
+                            };
+                            if let Some(expected_rule) = &step.rule_id {
+                                if proof.rule != Some(expected_rule.as_str()) {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                            chain_facts.add(claim.clone(), Origin::Proof(0, 0));
+                            chain_saturated.add(claim, Origin::Proof(0, 0));
+                            proofs.push(proof);
+                        }
+                        if !valid {
+                            break;
+                        }
+                    }
+                    if valid {
+                        let final_step = &steps[steps.len() - 1];
+                        for pattern in &final_step.claims {
+                            let claim = instantiate(pattern, &bind);
+                            if claim.has_unbound() {
+                                valid = false;
+                                break;
+                            }
+                            let final_rules: Vec<Rule> = if let Some(expected_rule) = &final_step.rule_id {
+                                rules.iter()
+                                    .filter(|candidate| candidate.id == expected_rule)
+                                    .cloned()
+                                    .collect()
+                            } else {
+                                rules.to_vec()
+                            };
+                            let Some(proof) = prove_rec(
+                                &claim,
+                                &chain_saturated,
+                                &final_rules,
+                                &chain_facts,
+                                1,
+                                &ancestors[..ancestors.len().saturating_sub(1)],
+                                disabled,
+                            ) else {
+                                valid = false;
+                                break;
+                            };
+                            if let Some(expected_rule) = &final_step.rule_id {
+                                if proof.rule != Some(expected_rule.as_str()) {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                            proofs.push(proof);
+                        }
+                    }
+                    if valid {
+                        return Some(Proof {
+                            claim: goal.clone(),
+                            antecedents: proofs,
+                            rule: Some("fallback-chain"),
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+
         let (structural, symbolic): (Vec<_>, Vec<_>) = rule
             .antecedents
             .iter()
@@ -520,7 +674,7 @@ fn prove_rec(
                                 if inst.has_unbound() || depth == 0 {
                                     continue 'binds;
                                 }
-                                if let Some(sub) = prove_rec(&inst, saturated, rules, base, depth - 1, &ancestors) {
+                                if let Some(sub) = prove_rec(&inst, saturated, rules, base, depth - 1, &ancestors, disabled) {
                                     parts.push((pos, sub));
                                     continue;
                                 }
@@ -531,7 +685,7 @@ fn prove_rec(
                         let sub = if base.contains(&w) || depth == 0 {
                             Proof::leaf(w)
                         } else {
-                            prove_rec(&w, saturated, rules, base, depth - 1, &ancestors)
+                            prove_rec(&w, saturated, rules, base, depth - 1, &ancestors, disabled)
                                 .unwrap_or_else(|| Proof::leaf(w.clone()))
                         };
                         parts.push((pos, sub));
@@ -618,20 +772,21 @@ pub fn to_chain(p: &Proof) -> Vec<(String, bool)> {
             out.push((s, false));
         }
     };
-    fn walk(p: &Proof, emit: &mut impl FnMut(&mut Vec<(String, bool)>, &Claim, bool), out: &mut Vec<(String, bool)>) {
+    fn walk(p: &Proof, emit: &mut impl FnMut(&mut Vec<(String, bool)>, &Claim, bool), out: &mut Vec<(String, bool)>, is_root: bool) {
         if p.antecedents.is_empty() {
             emit(out, &p.claim, true);
             return;
         }
         for ant in &p.antecedents {
-            walk(ant, emit, out);
+            walk(ant, emit, out, false);
         }
         match p.rule {
-            Some("square") | Some("sqrt") => {}
+            // Skip trivial bookkeeping nodes, but always emit the root.
+            Some("square") | Some("sqrt") if !is_root => {}
             _ => emit(out, &p.claim, false),
         }
     }
-    walk(p, &mut emit, &mut out);
+    walk(p, &mut emit, &mut out, true);
     out
 }
 
@@ -719,4 +874,3 @@ if p.rule.is_some() {
     }
     out
 }
-

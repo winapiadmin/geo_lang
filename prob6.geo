@@ -1,8 +1,6 @@
 inp:
 Triangle(A,B,C)
 H=Intersection(PerpendicularLine(C,AB),AB)
-Triangle(C,H,B,[rightAt=H])
-Triangle(C,H,A,[rightAt=H])
 prove:
 1. RightAt(CHB)=H
 2. RightAt(CHA)=H

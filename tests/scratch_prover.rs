@@ -19,7 +19,7 @@ fn scratch_stress() {
         if let Some(claim) = &goal.claim {
             for g in checker::claim_atoms(claim) {
                 if !saturated.contains(&g) {
-                    let _ = prover::prove_seeded(&g, &facts, &saturated, &rules);
+                    let _ = prover::prove_seeded(&g, &facts, &saturated, &rules, None);
                 }
                 facts.add(g.clone(), checker::Origin::Proof(goal.index, 0));
                 saturated.add(g.clone(), checker::Origin::Proof(goal.index, 0));
@@ -34,7 +34,7 @@ fn scratch_stress() {
         geo_lang::claim::Value::Bool(true),
     );
     let t = Instant::now();
-    let r = prover::prove_seeded(&goal, &facts, &saturated, &rules);
+    let r = prover::prove_seeded(&goal, &facts, &saturated, &rules, None);
     println!(
         "goal29 => {} in {:?}, rule={:?}",
         if r.is_some() { "OK" } else { "FAIL" },

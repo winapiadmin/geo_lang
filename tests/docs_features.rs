@@ -198,7 +198,7 @@ proof[1]:
     let file = parser::parse("t.geo", src).unwrap();
     let mut facts = checker::build_facts_from_input(&file);
     let _ = checker::apply_proofs(&file, &mut facts);
-    let rules = rules::rule_base();
+    let _rules = rules::rule_base();
 
     let median = Claim::pred(
         "IsMedian",

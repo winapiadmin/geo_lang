@@ -6,3 +6,8 @@ antecedents:
 requires:
 consequent:
   - AngleEq(Angle(B,A,D), Angle(D,A,C))
+chain:
+  IsAngleBisector(Seg2(A,D), Angle(B,A,C)) &&
+  On(D, Seg2(B,C))
+  ->
+  AngleEq(Angle(B,A,D), Angle(D,A,C))

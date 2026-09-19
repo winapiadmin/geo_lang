@@ -8,3 +8,10 @@ requires:
   - On(W, Seg2(Q,R))
 consequent:
   - IsMedian(W, Seg2(Q,R))
+chain:
+  IsIsosceles(AnyRef(T)) &&
+  IsPerpendicular(Seg2(P,W), Seg2(Q,R)) &&
+  IsoscelesAt(AnyRef(T), P) &&
+  On(W, Seg2(Q,R))
+  ->
+  IsMedian(W, Seg2(Q,R))

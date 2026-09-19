@@ -6,3 +6,8 @@ antecedents:
 requires:
 consequent:
   - OnSameCircle(A, B, C)
+chain:
+  SegEq(Seg2(O,A), Seg2(O,B)) &&
+  SegEq(Seg2(O,A), Seg2(O,C))
+  ->
+  OnSameCircle(A, B, C)

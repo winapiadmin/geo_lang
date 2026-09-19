@@ -5,3 +5,7 @@ antecedents:
 requires:
 consequent:
   - SegEq(Seg2(O,A), Seg2(O,B))
+chain:
+  IsCircumcenter(O, Angle(A,B,C))
+  ->
+  SegEq(Seg2(O,A), Seg2(O,B))

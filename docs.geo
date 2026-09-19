@@ -174,6 +174,21 @@ proof[2]:
 // chain: (Distance(A,D)=7 && Distance(B,D)=6) -> Distance(A,B)^2=85
 Nothing
 
+// Rule files may declare an explicit fallback proof:
+//
+//   chain:
+//     premise-a &&
+//     premise-b
+//     ->
+//     intermediate [other-rule]
+//     ->
+//     goal [another-rule]
+//
+// A fallback is used only as an independently checked derivation when the
+// declared rule is disabled. It must not invoke the disabled rule itself or
+// use the goal as a fake proof leaf. Add supporting rules when a theorem has
+// no existing alternate derivation.
+
 proof[3]:
 // `Nothing` also skips any proof steps that follow it.
 Nothing

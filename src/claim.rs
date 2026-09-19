@@ -224,11 +224,16 @@ impl Claim {
             return Claim::On(Self::norm_ref(&args[0]), Self::norm_seg(&args[1]));
         }
         // Helper: split concatenated multi-char point names like P1P2 -> [P1, P2].
+        // Also handles dash-separated refs like M-X -> [M, X].
         // Single-letter points (AB) are handled by norm_seg.
         fn split_multi_char_points(s: &str) -> Vec<String> {
             let s = s.to_lowercase();
             if s.len() < 2 {
                 return vec![s];
+            }
+            // If dash-separated, split on dash (e.g., P1-P2 -> [P1, P2]).
+            if s.contains('-') {
+                return s.split('-').filter(|p| !p.is_empty()).map(String::from).collect();
             }
             // Only split if there are digits (multi-char points).
             // Pure letters like AB, BC should not be split.
@@ -368,6 +373,10 @@ impl Claim {
                 return Claim::OnSameCircle(pts);
             }
             _ => args.iter().map(|a| Self::norm_ref(a)).collect(),
+        };
+        let value = match value {
+            Value::Point(p) => Value::Point(p.to_lowercase()),
+            other => other,
         };
         Claim::PredVal { name, args, value }
     }

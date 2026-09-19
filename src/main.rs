@@ -98,36 +98,8 @@ fn parse_single_claim(text: &str) -> Result<Vec<ast::ClaimExpr>, String> {
 
 /// Find the declared right triangle and its solved side lengths.
 /// Returns `(tri, apex, v1, v2)`. Lengths are queried on demand.
-fn right_triangle_ctx(
-    facts: &checker::FactStore,
-) -> Option<(String, char, char, char)> {
-    for c in facts.all() {
-        if let geo_lang::claim::Claim::PredVal { name, args, value } = &c {
-            if name == "rightat" && args.len() == 1 {
-                let apex = match value {
-                    geo_lang::claim::Value::Point(p) => p.chars().next()?,
-                    _ => continue,
-                };
-                let chars: Vec<char> = args[0].chars().collect();
-                if chars.len() == 3 && chars.contains(&apex) {
-                    let others: Vec<char> =
-                        chars.iter().copied().filter(|&c| c != apex).collect();
-                    if others.len() == 2 {
-                        return Some((
-                            args[0].clone(),
-                            apex,
-                            others[0],
-                            others[1],
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    None
-}
 
-fn run_prove(path: &str, goal_arg: Option<&str>, disabled: &[String]) -> ExitCode {
+fn run_prove(path: &str, goal_arg: Option<&str>, disabled: &[String], dump_depth: Option<usize>) -> ExitCode {
     let (source, src_text) = match read_source(path) {
         Ok(x) => x,
         Err(e) => {
@@ -152,21 +124,27 @@ fn run_prove(path: &str, goal_arg: Option<&str>, disabled: &[String]) -> ExitCod
     // the checker; Scope=Local proof internals stay hidden).
     let mut facts = checker::build_facts_from_input(&file);
     let _ = checker::apply_proofs(&file, &mut facts);
-    let mut rules = rules::rule_base();
-    // Filter out disabled rules
-    if !disabled.is_empty() {
-        let disabled_set: std::collections::HashSet<&str> = disabled.iter().map(|s| s.as_str()).collect();
-        let original_len = rules.len();
-        rules.retain(|r| !disabled_set.contains(&*r.id));
-        let removed = original_len - rules.len();
-        if removed > 0 {
-            println!("// Disabled {} rule(s): {}", removed, disabled.join(", "));
+    let rules = rules::rule_base();
+    // Build disabled set; rules are kept for chain fallback.
+    let disabled_set: std::collections::HashSet<&str> = if !disabled.is_empty() {
+        let set: std::collections::HashSet<&str> = disabled.iter().map(|s| s.as_str()).collect();
+        let count = rules.iter().filter(|r| set.contains(&*r.id)).count();
+        if count > 0 {
+            println!("// Disabled {} rule(s): {}", count, disabled.join(", "));
         }
-    }
+        set
+    } else {
+        std::collections::HashSet::new()
+    };
+    let disabled_opt = if disabled_set.is_empty() { None } else { Some(&disabled_set) };
     let mut any_unproven = false;
 
-    // One forward closure shared by every goal (single-claim path uses it too).
-    let mut saturated = prover::forward_saturate(&facts, &rules);
+    // Forward saturation uses only enabled rules.
+    let enabled_rules: Vec<&rules::Rule> = rules.iter()
+        .filter(|r| !disabled_set.contains(&*r.id))
+        .collect();
+    let enabled_rules_owned: Vec<rules::Rule> = enabled_rules.into_iter().cloned().collect();
+    let mut saturated = prover::forward_saturate_d(&facts, &enabled_rules_owned, dump_depth);
 
     if let Some(goal_text) = goal_arg {
         let exprs = match parse_single_claim(goal_text) {
@@ -195,7 +173,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>, disabled: &[String]) -> ExitCod
                 println!("{}: {}  (already established)", label, display);
                 continue;
             }
-            match prover::prove_seeded(goal, &facts, &saturated, &rules) {
+            match prover::prove_seeded(goal, &facts, &saturated, &rules, disabled_opt) {
                 Some(p) => {
                     let tree = prover::render_tree(&p, 0, Some(display));
                     for line in tree.lines() {
@@ -262,246 +240,58 @@ fn run_prove(path: &str, goal_arg: Option<&str>, disabled: &[String]) -> ExitCod
                     match c {
                         geo_lang::ast::CalcSpec::Len(lx) => {
                             let seg = lx.seg();
-                            match symbolic::solve_len(&seg, &goal_facts) {
-                                Some(v) => {
-                                    println!(
-                                        "// Calc({}) = {}",
-                                        checker::atom_display_len(lx),
-                                        v
-                                    );
-                                    // Formal derivation via right-triangle
-                                    // Pythagoras when applicable.
-                                    if seg.chars().count() == 2 {
-                                        if let Some((tri, apex, o1, o2)) =
-                                            right_triangle_ctx(&goal_facts)
-                                        {
-                                            let tri_u = tri.to_uppercase();
-                                            let s = seg.chars().collect::<Vec<char>>();
-                                            if s.len() == 2 {
-                                                let a = s[0];
-                                                let b = s[1];
-                                                let disp_seg = format!("{}{}", a.to_uppercase(), b.to_uppercase());
-                                                let disp_hyp = format!("{}{}", o1.to_uppercase(), o2.to_uppercase());
-                                                let is_hyp = (a == o1 && b == o2) || (a == o2 && b == o1);
-                                                if is_hyp {
-                                                    let l1d = format!("{}{}", apex.to_uppercase(), o1.to_uppercase());
-                                                    let l2d = format!("{}{}", apex.to_uppercase(), o2.to_uppercase());
-                                                    println!(
-                                                        "(RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2+{}^2)={}",
-                                                        tri_u, apex.to_uppercase(),
-                                                        disp_seg, l1d, l2d,
-                                                        disp_seg, l1d, l2d, v
-                                                    );
-                                                } else {
-                                                    // It's a leg; find the other leg.
-                                                    // The other leg goes from apex
-                                                    // to the vertex NOT in seg.
-                                                    let rem = if o1 != a && o1 != b { o1 } else { o2 };
-                                                    let other_leg = format!("{}{}", apex.to_uppercase(), rem.to_uppercase());
-                                                    let hv = symbolic::solve_len(
-                                                        &geo_lang::claim::Claim::norm_seg(&disp_hyp),
-                                                        &goal_facts,
-                                                    );
-                                                    let ov = symbolic::solve_len(
-                                                        &geo_lang::claim::Claim::norm_seg(&other_leg),
-                                                        &goal_facts,
-                                                    );
-                                                    if let (Some(hv), Some(ov)) = (hv, ov) {
-                                                        println!(
-                                                            "(RightAt({})={}) -> {}^2+{}^2={}^2 -> {}=sqrt({}^2-{}^2)=sqrt({}-{})={}",
-                                                            tri_u, apex.to_uppercase(),
-                                                            disp_seg, other_leg, disp_hyp,
-                                                            disp_seg, disp_hyp, other_leg,
-                                                            hv*hv, ov*ov,
-                                                            v
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
+                            let display = checker::atom_display_len(lx);
+                            // Try to build a formal proof tree via numeric_proof.
+                            let claim = geo_lang::claim::Claim::len_eq(
+                                &geo_lang::claim::Claim::norm_seg(&seg),
+                                symbolic::solve_len(&seg, &goal_facts).unwrap_or(0),
+                            );
+                            if let Some(p) = geo_lang::prover::prove_seeded(
+                                &claim, &goal_facts, &saturated, &rules, disabled_opt,
+                            ) {
+                                let tree = geo_lang::prover::render_tree(&p, 0, Some(&display));
+                                for line in tree.lines() {
+                                    println!("// {}", line);
                                 }
-                                None => {
-                                    println!(
-                                        "// Calc({}) = ? (length not determined)",
-                                        checker::atom_display_len(lx)
-                                    );
-                                    println!(" Nothing");
-                                    any_unproven = true;
-                                }
+                                let chain = geo_lang::prover::render_chain(&p, None);
+                                println!("{}", chain);
+                            } else if let Some(v) = symbolic::solve_len(&seg, &goal_facts) {
+                                // Fallback: just print the value.
+                                println!("// Calc({}) = {}", display, v);
+                            } else {
+                                println!("// Calc({}) = ? (length not determined)", display);
+                                println!(" Nothing");
+                                any_unproven = true;
                             }
                         }
                         geo_lang::ast::CalcSpec::Angle(angle_ref) => {
                             // Angle(A B C): the vertex is the MIDDLE letter.
-                            let v: char = angle_ref.chars().nth(1).unwrap_or('?');
-                            let tri =
-                                symbolic::find_triangle_with_vertex(&v.to_string(), &goal_facts);
-                            match tri
-                                .and_then(|t| symbolic::angle_degrees(&t, v, &goal_facts))
-                            {
-                                Some(deg) => {
-                                    println!(
-                                        "// Calc(Angle({})) = {:.2}",
-                                        angle_ref.to_uppercase(),
-                                        deg
-                                    );
-                                    // Choose sin/cos/tan based on Sum goal context.
-                                    let mut chained = false;
-                                    let mut want_trig = String::from("cos");
-                                    for g in &file.goals {
-                                        if let Some(ast::ClaimExpr::Sum { rhs, .. }) = &g.claim {
-                                            for t in rhs {
-                                                if let Some(a) = &t.cos_angle {
-                                                    if a.to_uppercase() == angle_ref.to_uppercase() {
-                                                        want_trig = String::from("cos");
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // Right triangle: choose sin/cos/tan.
-                                    if let Some(t) = symbolic::find_triangle_with_vertex(
-                                        &v.to_string(),
-                                        &goal_facts,
-                                    ) {
-                                        let chars: Vec<char> = t.chars().collect();
-                                        let right_apex = goal_facts.all().into_iter().find_map(|c| {
-                                            match &c {
-                                                geo_lang::claim::Claim::PredVal {
-                                                    name,
-                                                    args,
-                                                    value,
-                                                } if name == "rightat"
-                                                    && args.len() == 1
-                                                    && args[0] == *t =>
-                                                {
-                                                    match value {
-                                                        geo_lang::claim::Value::Point(p) => {
-                                                            p.chars().next()
-                                                        }
-                                                        _ => None,
-                                                    }
-                                                }
-                                                _ => None,
-                                            }
-                                        });
-                                        if let Some(r) = right_apex {
-                                            if r != v && chars.contains(&r) {
-                                                let w: char = *chars
-                                                    .iter()
-                                                    .find(|&&c| c != v && c != r)
-                                                    .unwrap_or(&'?');
-                                                let seg = |a: char, b: char| -> String {
-                                                    format!("{}{}", a.to_uppercase(), b.to_uppercase())
-                                                };
-                                                let opp = geo_lang::claim::Claim::seg_key(
-                                                    &r.to_string(), &w.to_string());
-                                                let adj = geo_lang::claim::Claim::seg_key(
-                                                    &v.to_string(), &r.to_string());
-                                                let hyp = geo_lang::claim::Claim::seg_key(
-                                                    &v.to_string(), &w.to_string());
-                                                let ov = symbolic::solve_len(&opp, &goal_facts);
-                                                let av = symbolic::solve_len(&adj, &goal_facts);
-                                                let hv = symbolic::solve_len(&hyp, &goal_facts);
-                                                let vu = v.to_uppercase();
-                                                let reduced = |num: u32, den: u32| -> (u32, u32) {
-                                                    let (mut a, mut b) = (num, den);
-                                                    while b != 0 { let t = a % b; a = b; b = t; }
-                                                    let g = if a == 0 { 1 } else { a };
-                                                    (num / g, den / g)
-                                                };
-                                                let show = |trig: &str, ns: &str, ds: &str, nv: u32, dv: u32| {
-                                                    let (fn_, fd) = reduced(nv, dv);
-                                                    let rad = match trig {
-                                                        "sin" => (nv as f64 / dv as f64).asin(),
-                                                        "cos" => (nv as f64 / dv as f64).acos(),
-                                                        _ => (nv as f64 / dv as f64).atan(),
-                                                    };
-                                                    let deg = rad * 180.0 / std::f64::consts::PI;
-                                                    // Valid .geo: ratio equality
-                                                    println!(
-                                                        "{}/{}={}/{}",
-                                                        ns, ds, fn_, fd
-                                                    );
-                                                    // Trig explanation as comment
-                                                    println!(
-                                                        "// {}({})={}/{}={}/{} -> {}=arc{}({}/{})={:.2}",
-                                                        trig, vu, ns, ds, fn_, fd,
-                                                        vu, trig, fn_, fd, deg
-                                                    );
-                                                };
-                                                if want_trig == "cos" {
-                                                    if let (Some(a), Some(h)) = (av, hv) {
-                                                        show("cos", &seg(v, r), &seg(v, w), a, h);
-                                                        chained = true;
-                                                    }
-                                                } else if want_trig == "sin" {
-                                                    if let (Some(o), Some(h)) = (ov, hv) {
-                                                        show("sin", &seg(r, w), &seg(v, w), o, h);
-                                                        chained = true;
-                                                    }
-                                                } else {
-                                                    if let (Some(o), Some(a)) = (ov, av) {
-                                                        show("tan", &seg(r, w), &seg(v, r), o, a);
-                                                        chained = true;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // Law-of-cosines fallback.
-                                    if !chained {
-                                    if let Some(t) =
-                                        symbolic::find_triangle_with_vertex(&v.to_string(), &goal_facts)
-                                    {
-                                        let chars: Vec<char> = t.chars().collect();
-                                        let apex_pos = chars
-                                            .iter()
-                                            .position(|&c| c == v)
-                                            .unwrap_or(0);
-                                        let o1 = chars[(apex_pos + 1) % 3];
-                                        let o2 = chars[(apex_pos + 2) % 3];
-                                        let sides: Vec<String> = [
-                                            (v, o1),
-                                            (v, o2),
-                                            (o1, o2),
-                                        ]
-                                        .iter()
-                                        .filter_map(|(a, b)| {
-                                            let key = geo_lang::claim::Claim::seg_key(
-                                                &a.to_string(),
-                                                &b.to_string(),
-                                            );
-                                            symbolic::solve_len(&key, &goal_facts).map(|n| {
-                                                format!(
-                                                    "{}{}={}",
-                                                    a.to_uppercase(),
-                                                    b.to_uppercase(),
-                                                    n
-                                                )
-                                            })
-                                        })
-                                        .collect();
-                                        if sides.len() == 3 {
-                                            println!(
-                                                "({}) -> Angle({})={:.2} [law-of-cosines]",
-                                                sides.join(" && "),
-                                                angle_ref.to_uppercase(),
-                                                deg
-                                            );
-                                        }
-                                    }
-                                    }
+                            // For single-letter vertex (e.g., Calc(Angle(U))), find
+                            // which triangle contains it.
+                            let v: char = if angle_ref.len() >= 3 {
+                                angle_ref.chars().nth(1).unwrap_or('?')
+                            } else {
+                                angle_ref.chars().next().unwrap_or('?')
+                            };
+                            let display = format!("Angle({})", angle_ref.to_uppercase());
+                            // Try to build a formal proof tree via angle_proof.
+                            if let Some(p) = symbolic::angle_proof(&v.to_string(), &goal_facts) {
+                                let tree = geo_lang::prover::render_tree(&p, 0, Some(&display));
+                                for line in tree.lines() {
+                                    println!("// {}", line);
                                 }
-                                None => {
-                                    println!(
-                                        "// Calc(Angle({})) = ? (cannot be determined)",
-                                        angle_ref.to_uppercase()
-                                    );
-                                    println!("Nothing");
-                                    any_unproven = true;
-                                }
+                                let chain = geo_lang::prover::render_chain(&p, None);
+                                println!("{}", chain);
+                            } else if let Some((_, deg)) = symbolic::angle_degrees_any(&v.to_string(), &goal_facts) {
+                                // Fallback: just print the value.
+                                println!("// Calc(Angle({})) = {:.2}", angle_ref.to_uppercase(), deg);
+                            } else {
+                                println!(
+                                    "// Calc(Angle({})) = ? (cannot be determined)",
+                                    angle_ref.to_uppercase()
+                                );
+                                println!(" Nothing");
+                                any_unproven = true;
                             }
                         }
                     }
@@ -590,6 +380,35 @@ fn run_prove(path: &str, goal_arg: Option<&str>, disabled: &[String]) -> ExitCod
                     }
                     // Numeric evaluation: compute both sides and check equality.
                     if items.len() >= 2 {
+                        // Try exact rational comparison first.
+                        let rat_vals: Vec<Option<symbolic::EXRat>> = items
+                            .iter()
+                            .map(|e| symbolic::eval_len_expr_ratio(e, &goal_facts))
+                            .collect();
+                        let rat_ok = rat_vals.iter().all(|v| v.is_some())
+                            && rat_vals[1..].iter().all(|v| *v.as_ref().unwrap() == *rat_vals[0].as_ref().unwrap());
+                        if rat_ok {
+                            // Show derivation trees for segment items.
+                            for item in items.iter() {
+                                let seg_str = item.seg();
+                                if !seg_str.is_empty() {
+                                    if let Some(p) = symbolic::ratio_derivation_proof(&seg_str, &goal_facts) {
+                                        let display = checker::render_len_expr(item);
+                                        let tree = prover::render_tree(&p, 1, Some(&display));
+                                        for line in tree.lines() {
+                                            println!("// {}", line);
+                                        }
+                                    }
+                                }
+                            }
+                            let parts: Vec<String> = items
+                                .iter()
+                                .map(|e| checker::render_len_expr(e))
+                                .collect();
+                            println!("{}", parts.join("="));
+                            continue;
+                        }
+                        // Fall back to f64 comparison for trig/irrationals.
                         let vals: Vec<Option<f64>> = items
                             .iter()
                             .map(|e| symbolic::eval_len_expr(e, &goal_facts))
@@ -597,7 +416,6 @@ fn run_prove(path: &str, goal_arg: Option<&str>, disabled: &[String]) -> ExitCod
                         if vals.iter().all(|v| v.is_some()) {
                             let v0 = vals[0].unwrap();
                             if vals[1..].iter().all(|v| (v.unwrap() - v0).abs() < 1e-9) {
-                                // Show the evaluation result.
                                 let parts: Vec<String> = items
                                     .iter()
                                     .map(|e| checker::render_len_expr(e))
@@ -619,7 +437,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>, disabled: &[String]) -> ExitCod
                     // Try to find a proof chain even if the fact is already
                     // established (e.g. from auto-derivation), so the user
                     // can see the derivation steps.
-                    match prover::prove_seeded(g, &goal_facts, &saturated, &rules) {
+                    match prover::prove_seeded(g, &goal_facts, &saturated, &rules, disabled_opt) {
                         Some(p) => {
                             let tree = prover::render_tree(&p, 0, Some(display));
                             for line in tree.lines() {
@@ -678,16 +496,21 @@ fn main() -> ExitCode {
         }
         "prove" => {
             let disable = disable_rules(&args[2..]);
+            let dump_depth = args.iter().skip(2)
+                .find(|a| a.starts_with("-dump-facts=") || a.starts_with("--dump-facts="))
+                .and_then(|a| a.split('=').nth(1))
+                .and_then(|s| s.parse::<usize>().ok());
             let positional: Vec<&String> =
-                args.iter().skip(2).filter(|a| !a.starts_with("-e:") && !a.starts_with("-disable:")).collect();
+                args.iter().skip(2).filter(|a| !a.starts_with("-e:") && !a.starts_with("-disable:") && !a.starts_with("-dump-facts=") && !a.starts_with("--dump-facts=")).collect();
             if positional.len() < 1 || positional.len() > 2 {
-                eprintln!("usage: geo_lang prove <file.geo> [claim] [-disable:Rule1,Rule2]");
+                eprintln!("usage: geo_lang prove <file.geo> [claim] [-disable:Rule1,Rule2] [-dump-facts=N]");
                 return ExitCode::from(2);
             }
             run_prove(
                 positional[0],
                 positional.get(1).map(|s| s.as_str()),
                 &disable,
+                dump_depth,
             )
         }
         "help" | "--help" | "-h" => {
@@ -701,13 +524,3 @@ fn main() -> ExitCode {
         }
     }
 }
-
-
-
-
-
-
-
-
-
-

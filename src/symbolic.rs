@@ -13,11 +13,15 @@
 //! and `AE/EC` are seen equal when `3/2 = 6/4` (cross-multiplication is
 //! implicit in the reduction).
 
+use crate::ast::LenExpr;
 use crate::claim::{Claim, RatioAtom, RatioExpr, Value};
 use crate::checker::{render_len_expr, split_seg, FactStore};
 use crate::prover::Proof;
 use crate::checker;
 use std::collections::HashMap;
+
+/// Exact rational type alias for dashu (arbitrary precision).
+pub type EXRat = dashu::rational::RBig;
 
 /// How a numeric value was derived: the rule name and the numeric claims it
 /// used as inputs. The inputs are `Claim::LenEq` or `Claim::SqEq` facts that
@@ -352,6 +356,68 @@ fn propagate(env: &mut NumericEnv, claims: &[Claim], on: &HashMap<String, Vec<ch
         }
     }
 
+    // Midpoint halves: SegEq(X, Y) where X and Y share an endpoint means the
+    // two segments are equal halves of the "total" segment spanning their
+    // outer endpoints.  If the total has a known length, each half = total/2.
+    // The shared endpoint must lie on the total segment (checked via the `on`
+    // map) to avoid false positives from non-collinear equal segments (e.g.
+    // equal medians of a right triangle).
+    {
+        let seg_eqs: Vec<(String, String)> = claims.iter().filter_map(|c| {
+            if let Claim::SegEq(x, y) = c { Some((x.clone(), y.clone())) } else { None }
+        }).collect();
+        for (x_seg, y_seg) in &seg_eqs {
+            let xa = Claim::norm_ref(x_seg.chars().next().unwrap_or('\0').to_string().as_str());
+            let xb = Claim::norm_ref(x_seg.chars().last().unwrap_or('\0').to_string().as_str());
+            let ya = Claim::norm_ref(y_seg.chars().next().unwrap_or('\0').to_string().as_str());
+            let yb = Claim::norm_ref(y_seg.chars().last().unwrap_or('\0').to_string().as_str());
+            let (outer_a, shared, outer_b) = if xb == ya {
+                (xa.clone(), xb.clone(), yb.clone())
+            } else if xa == yb {
+                (ya.clone(), xa.clone(), xb.clone())
+            } else if xa == ya {
+                (xb.clone(), xa.clone(), yb.clone())
+            } else if xb == yb {
+                (xa.clone(), xb.clone(), ya.clone())
+            } else {
+                continue;
+            };
+            let total = Claim::seg_key(&outer_a, &outer_b);
+            // Verify the shared endpoint lies on the total segment.
+            let shared_ch = shared.chars().next().unwrap_or('\0');
+            if let Some(line_pts) = on.get(&total) {
+                if !line_pts.contains(&shared_ch) {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+            if let Some(total_len) = get_len(env, &total) {
+                if total_len % 2 == 0 {
+                    let half = total_len / 2;
+                    if get_len(env, x_seg).is_none() {
+                        record_len(
+                            env,
+                            x_seg,
+                            half,
+                            "midpoint-halves",
+                            vec![Claim::seg_eq(x_seg, y_seg), Claim::len_eq(&total, total_len)],
+                        );
+                    }
+                    if get_len(env, y_seg).is_none() {
+                        record_len(
+                            env,
+                            y_seg,
+                            half,
+                            "midpoint-halves",
+                            vec![Claim::seg_eq(x_seg, y_seg), Claim::len_eq(&total, total_len)],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // Right triangles declared via `rightAt`: hypotenuse squared equals the
     // sum of the leg squares, so any two known sides yield the third.
     for c in claims {
@@ -385,15 +451,15 @@ fn propagate(env: &mut NumericEnv, claims: &[Claim], on: &HashMap<String, Vec<ch
             // hyp² = l1² + l2²
             if let (Some(a), Some(b), None) = (l1_sq, l2_sq, get_sq(env, &hyp)) {
                 if let Some(total) = a.checked_add(b) {
-                    record_sq(env, &hyp, total, "right-triangle", vec![]);
+                    record_sq(env, &hyp, total, "right-triangle", vec![Claim::sq_eq(&leg1, a), Claim::sq_eq(&leg2, b)]);
                 }
             } else if let (Some(h), Some(a), None) = (h_sq, l1_sq, get_sq(env, &leg2)) {
                 if h > a {
-                    record_sq(env, &leg2, h - a, "right-triangle", vec![]);
+                    record_sq(env, &leg2, h - a, "right-triangle", vec![Claim::sq_eq(&hyp, h), Claim::sq_eq(&leg1, a)]);
                 }
             } else if let (Some(h), Some(b), None) = (h_sq, l2_sq, get_sq(env, &leg1)) {
                 if h > b {
-                    record_sq(env, &leg1, h - b, "right-triangle", vec![]);
+                    record_sq(env, &leg1, h - b, "right-triangle", vec![Claim::sq_eq(&hyp, h), Claim::sq_eq(&leg2, b)]);
                 }
             }
         }
@@ -524,16 +590,100 @@ pub fn solve_len(seg: &str, facts: &FactStore) -> Option<u32> {
     get_len(&env, seg)
 }
 
+/// Try to resolve a segment's length as a float through ratio arithmetic.
+/// For example, if AE/EC=3/4 and AE+EC=10, then AE=30/7 and EC=40/7.
+fn resolve_seg_float(seg: &str, facts: &FactStore) -> Option<f64> {
+    let s = Claim::norm_seg(seg);
+    let env = compute(facts);
+    let all = facts.all();
+    // For each RatioEq fact involving this segment:
+    //   numer_seg/denom_seg = rational
+    // Try segment addition: numer_seg + denom_seg = total.
+    for f in &all {
+        if let Claim::RatioEq(lhs, rhs) = f {
+            let (numer_seg, denom_seg, other_side) = match (lhs, rhs) {
+                (
+                    RatioExpr::Quot {
+                        num: RatioAtom::Seg(n),
+                        den: RatioAtom::Seg(d),
+                    },
+                    rhs,
+                ) => (n, d, rhs),
+                (
+                    lhs,
+                    RatioExpr::Quot {
+                        num: RatioAtom::Seg(n),
+                        den: RatioAtom::Seg(d),
+                    },
+                ) => (n, d, lhs),
+                _ => continue,
+            };
+            let is_numer = Claim::norm_seg(numer_seg) == s;
+            let is_denom = Claim::norm_seg(denom_seg) == s;
+            if !is_numer && !is_denom {
+                continue;
+            }
+            if let Some((rn, rd)) = resolve_ratio(other_side, &env) {
+                // Strategy 1: direct — the other segment's length is known
+                let known_seg = if is_numer { denom_seg } else { numer_seg };
+                if let Some(known_len) = solve_len(known_seg, facts) {
+                    if is_numer {
+                        // seg = rn/rd * known_len
+                        return Some(rn as f64 / rd as f64 * known_len as f64);
+                    } else {
+                        // known_is_numer: known_len/seg = rn/rd => seg = rd/rn * known_len
+                        if rn > 0 {
+                            return Some(rd as f64 / rn as f64 * known_len as f64);
+                        }
+                    }
+                }
+                // Strategy 2: segment addition — seg + other_part = total
+                // numer/denom = rn/rd, numer + denom = total
+                // If seg is numer: seg = rn/(rn+rd) * total
+                // If seg is denom: seg = rd/(rn+rd) * total
+                for f2 in &all {
+                    if let Claim::OnSegment(p, s_ref) = f2 {
+                        if let Some((a, b)) = norm_pts(s_ref) {
+                            let pch = Claim::norm_ref(p).chars().next().unwrap_or('\0');
+                            if pch != a && pch != b {
+                                let ap = Claim::seg_key(&a.to_string(), &pch.to_string());
+                                let pb = Claim::seg_key(&pch.to_string(), &b.to_string());
+                                let total = Claim::seg_key(&a.to_string(), &b.to_string());
+                                let ap_n = Claim::norm_seg(&ap);
+                                let pb_n = Claim::norm_seg(&pb);
+                                let n_n = Claim::norm_seg(numer_seg);
+                                let d_n = Claim::norm_seg(denom_seg);
+                                if (ap_n == n_n && pb_n == d_n) || (ap_n == d_n && pb_n == n_n) {
+                                    if let Some(total_len) = solve_len(&total, facts) {
+                                        if is_numer {
+                                            return Some(rn as f64 / (rn + rd) as f64 * total_len as f64);
+                                        } else {
+                                            return Some(rd as f64 / (rn + rd) as f64 * total_len as f64);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Evaluate a compound `LenExpr` to a floating-point value.
 /// Handles Seg, Num, Distance, Sq, Sqrt, Add/Sub/Mul, and Trig.
 pub fn eval_len_expr(e: &crate::ast::LenExpr, facts: &FactStore) -> Option<f64> {
     use crate::ast::LenExpr;
     match e {
-        LenExpr::Num(n) => Some(*n as f64),
-        LenExpr::Seg(seg) => solve_len(seg, facts).map(|n| n as f64),
+        LenExpr::Num(n) => Some(*n),
+        LenExpr::Seg(seg) => solve_len(seg, facts).map(|n| n as f64)
+            .or_else(|| resolve_seg_float(seg, facts)),
         LenExpr::Distance(a, b) => {
             let seg = crate::claim::Claim::seg_key(a, b);
             solve_len(&seg, facts).map(|n| n as f64)
+                .or_else(|| resolve_seg_float(&seg, facts))
         }
         LenExpr::Sq(inner) => {
             let v = eval_len_expr(inner, facts)?;
@@ -552,16 +702,30 @@ pub fn eval_len_expr(e: &crate::ast::LenExpr, facts: &FactStore) -> Option<f64> 
         LenExpr::Mul(l, r) => {
             Some(eval_len_expr(l, facts)? * eval_len_expr(r, facts)?)
         }
+        LenExpr::Div(l, r) => {
+            let denom = eval_len_expr(r, facts)?;
+            if denom == 0.0 {
+                None
+            } else {
+                Some(eval_len_expr(l, facts)? / denom)
+            }
+        }
         LenExpr::Trig(func, angle) => {
-            let v = angle.chars().next()?;
+            // For 3-char angle refs like "uvw", the vertex is the MIDDLE char
+            // (convention: Angle(XYZ) → vertex is Y).
+            let v = if angle.len() == 3 {
+                angle.chars().nth(1)?
+            } else {
+                angle.chars().next()?
+            };
             let triangles: Vec<String> = facts
                 .all()
                 .into_iter()
                 .filter_map(|c| match c {
                     Claim::PredVal { name, args, value }
-                        if name == "triangle"
-                            && value == Value::Bool(true)
-                            && args.len() == 1 =>
+                        if (name == "triangle" && value == Value::Bool(true) && args.len() == 1)
+                            || ((name == "rightat" || name == "obtuseat" || name == "isoscelesat")
+                                && args.len() == 1) =>
                     {
                         Some(args[0].clone())
                     }
@@ -569,7 +733,7 @@ pub fn eval_len_expr(e: &crate::ast::LenExpr, facts: &FactStore) -> Option<f64> 
                 })
                 .collect();
             for tri in &triangles {
-                if tri.contains(v) {
+                if tri.to_lowercase().contains(v) {
                     let c = cos_of_vertex(tri, v, facts)?;
                     return match func.as_str() {
                         "cos" => Some(c),
@@ -594,6 +758,214 @@ pub fn eval_len_expr(e: &crate::ast::LenExpr, facts: &FactStore) -> Option<f64> 
             None
         }
     }
+}
+
+/// Evaluate a `LenExpr` to an exact rational where possible.
+/// Returns `None` for irrationals (Trig, Sqrt of non-perfect-squares).
+pub fn eval_len_expr_ratio(e: &crate::ast::LenExpr, facts: &FactStore) -> Option<EXRat> {
+    use crate::ast::LenExpr;
+    match e {
+        LenExpr::Num(n) => {
+            if *n == 0.0 {
+                Some(EXRat::ZERO)
+            } else if n.fract() == 0.0 {
+                Some(EXRat::from(*n as i64))
+            } else {
+                EXRat::try_from(*n).ok()
+            }
+        }
+        LenExpr::Seg(seg) => {
+            if let Some(n) = solve_len(seg, facts) {
+                return Some(EXRat::from(n as i64));
+            }
+            resolve_seg_ratio(seg, facts)
+        }
+        LenExpr::Distance(a, b) => {
+            let seg = crate::claim::Claim::seg_key(a, b);
+            if let Some(n) = solve_len(&seg, facts) {
+                return Some(EXRat::from(n as i64));
+            }
+            resolve_seg_ratio(&seg, facts)
+        }
+        LenExpr::Add(l, r) => {
+            let lv = eval_len_expr_ratio(l, facts)?;
+            let rv = eval_len_expr_ratio(r, facts)?;
+            Some(lv + rv)
+        }
+        LenExpr::Sub(l, r) => {
+            let lv = eval_len_expr_ratio(l, facts)?;
+            let rv = eval_len_expr_ratio(r, facts)?;
+            Some(lv - rv)
+        }
+        LenExpr::Mul(l, r) => {
+            let lv = eval_len_expr_ratio(l, facts)?;
+            let rv = eval_len_expr_ratio(r, facts)?;
+            Some(lv * rv)
+        }
+        LenExpr::Div(l, r) => {
+            let lv = eval_len_expr_ratio(l, facts)?;
+            let rv = eval_len_expr_ratio(r, facts)?;
+            if rv == EXRat::ZERO { None } else { Some(lv / rv) }
+        }
+        LenExpr::Sq(inner) => {
+            let v = eval_len_expr_ratio(inner, facts)?;
+            Some(v.clone() * v)
+        }
+        LenExpr::Sqrt(inner) => {
+            let v = eval_len_expr_ratio(inner, facts)?;
+            let approx = eval_len_expr(inner, facts)?;
+            let rounded = approx.round() as i64;
+            if (approx - rounded as f64).abs() < 1e-9 && rounded >= 0 {
+                let sq = EXRat::from(rounded);
+                if sq.clone() * sq.clone() == v {
+                    return Some(sq);
+                }
+            }
+            None
+        }
+        LenExpr::Trig(..) => None,
+    }
+}
+
+/// Resolve a segment's length as an exact rational through ratio arithmetic.
+/// For example, if AE/EC=3/4 and AE+EC=10, returns 30/7.
+pub fn resolve_seg_ratio(seg: &str, facts: &FactStore) -> Option<EXRat> {
+    let s = Claim::norm_seg(seg);
+    let env = compute(facts);
+    let all = facts.all();
+    for f in &all {
+        if let Claim::RatioEq(lhs, rhs) = f {
+            let (numer_seg, denom_seg, other_side) = match (lhs, rhs) {
+                (
+                    RatioExpr::Quot { num: RatioAtom::Seg(n), den: RatioAtom::Seg(d) },
+                    rhs,
+                ) => (n, d, rhs),
+                (
+                    lhs,
+                    RatioExpr::Quot { num: RatioAtom::Seg(n), den: RatioAtom::Seg(d) },
+                ) => (n, d, lhs),
+                _ => continue,
+            };
+            let is_numer = Claim::norm_seg(numer_seg) == s;
+            let is_denom = Claim::norm_seg(denom_seg) == s;
+            if !is_numer && !is_denom { continue; }
+            if let Some((rn, rd)) = resolve_ratio(other_side, &env) {
+                let rn = rn as i64;
+                let rd = rd as i64;
+                let known_seg = if is_numer { denom_seg } else { numer_seg };
+                if let Some(known_len) = solve_len(known_seg, facts) {
+                    let kl = known_len as i64;
+                    if is_numer {
+                        let r: EXRat = EXRat::from(rn) * EXRat::from(kl) / EXRat::from(rd);
+                        return Some(r);
+                    } else {
+                        if rn != 0 {
+                            let r: EXRat = EXRat::from(rd) * EXRat::from(kl) / EXRat::from(rn);
+                            return Some(r);
+                        }
+                    }
+                }
+                for f2 in &all {
+                    if let Claim::OnSegment(p, s_ref) = f2 {
+                        if let Some((a, b)) = norm_pts(s_ref) {
+                            let pch = Claim::norm_ref(p).chars().next().unwrap_or('\0');
+                            if pch != a && pch != b {
+                                let ap = Claim::seg_key(&a.to_string(), &pch.to_string());
+                                let pb = Claim::seg_key(&pch.to_string(), &b.to_string());
+                                let total = Claim::seg_key(&a.to_string(), &b.to_string());
+                                let ap_n = Claim::norm_seg(&ap);
+                                let pb_n = Claim::norm_seg(&pb);
+                                let n_n = Claim::norm_seg(numer_seg);
+                                let d_n = Claim::norm_seg(denom_seg);
+                                if (ap_n == n_n && pb_n == d_n) || (ap_n == d_n && pb_n == n_n) {
+                                    if let Some(total_len) = solve_len(&total, facts) {
+                                        let tl = total_len as i64;
+                                        let scale = if is_numer { rn } else { rd };
+                                        let sum = rn + rd;
+                                        if sum != 0 {
+                                            let r: EXRat = EXRat::from(scale) * EXRat::from(tl) / EXRat::from(sum);
+                                            return Some(r);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Build a derivation proof for a segment resolved through ratio arithmetic.
+/// Returns a Proof showing which facts were used to derive the segment's length.
+pub fn ratio_derivation_proof(seg: &str, facts: &FactStore) -> Option<Proof> {
+    let s = Claim::norm_seg(seg);
+    let env = compute(facts);
+    let all = facts.all();
+    let mut ratio_fact: Option<&Claim> = None;
+    let mut on_seg_fact: Option<&Claim> = None;
+    let mut total_seg: Option<String> = None;
+    for f in &all {
+        if let Claim::RatioEq(lhs, rhs) = f {
+            let (numer_seg, denom_seg, other_side) = match (lhs, rhs) {
+                (
+                    RatioExpr::Quot { num: RatioAtom::Seg(n), den: RatioAtom::Seg(d) },
+                    rhs,
+                ) => (n, d, rhs),
+                (
+                    lhs,
+                    RatioExpr::Quot { num: RatioAtom::Seg(n), den: RatioAtom::Seg(d) },
+                ) => (n, d, lhs),
+                _ => continue,
+            };
+            let is_numer = Claim::norm_seg(numer_seg) == s;
+            let is_denom = Claim::norm_seg(denom_seg) == s;
+            if !is_numer && !is_denom { continue; }
+            if resolve_ratio(other_side, &env).is_some() {
+                ratio_fact = Some(f);
+                for f2 in &all {
+                    if let Claim::OnSegment(p, s_ref) = f2 {
+                        if let Some((a, b)) = norm_pts(s_ref) {
+                            let pch = Claim::norm_ref(p).chars().next().unwrap_or('\0');
+                            if pch != a && pch != b {
+                                let ap = Claim::seg_key(&a.to_string(), &pch.to_string());
+                                let pb = Claim::seg_key(&pch.to_string(), &b.to_string());
+                                let ap_n = Claim::norm_seg(&ap);
+                                let pb_n = Claim::norm_seg(&pb);
+                                let n_n = Claim::norm_seg(numer_seg);
+                                let d_n = Claim::norm_seg(denom_seg);
+                                if (ap_n == n_n && pb_n == d_n) || (ap_n == d_n && pb_n == n_n) {
+                                    on_seg_fact = Some(f2);
+                                    total_seg = Some(Claim::seg_key(&a.to_string(), &b.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+    if let (Some(rf), Some(osf), Some(ts)) = (ratio_fact, on_seg_fact, total_seg) {
+        let mut antecedents = vec![
+            Proof { claim: rf.clone(), antecedents: vec![], rule: None },
+            Proof { claim: osf.clone(), antecedents: vec![], rule: None },
+        ];
+        if let Some(n) = solve_len(&ts, facts) {
+            antecedents.push(Proof { claim: Claim::len_eq(&ts, n), antecedents: vec![], rule: None });
+        }
+        // Build a display-only claim showing the exact value.
+        // Use the rendered form from the EqChain item itself.
+        let display_claim = Claim::len_eq(seg, solve_len(seg, facts).unwrap_or(0));
+        return Some(Proof {
+            claim: display_claim,
+            antecedents,
+            rule: Some("ratio-segment-addition"),
+        });
+    }
+    None
 }
 
 /// True if the ratio equality holds numerically, e.g. `AD/DB = AE/EC` when
@@ -663,7 +1035,9 @@ pub fn numeric_solves(goal: &Claim, facts: &FactStore) -> bool {
         Claim::LenEq(seg, n) => solve_len(seg, facts) == Some(*n),
         Claim::SqEq(seg, v) => {
             let env = compute(facts);
-            env.sq.get(&Claim::norm_seg(seg)).copied() == Some(*v)
+            let key = Claim::norm_seg(seg);
+            let found = env.sq.get(&key).copied();
+            found == Some(*v)
         }
         Claim::SegEq(a, b) => {
             if let (Some(x), Some(y)) = (solve_len(a, facts), solve_len(b, facts)) {
@@ -672,46 +1046,56 @@ pub fn numeric_solves(goal: &Claim, facts: &FactStore) -> bool {
                 }
             }
             // Ratio-to-segment: if AB/X = CD/X for some X and ratio R,
-            // then AB = CD.
+            // then AB = CD. Also works with R = 1/2.
             let na = Claim::norm_seg(a);
             let nb = Claim::norm_seg(b);
             let all = facts.all();
             for f in &all {
                 if let Claim::RatioEq(ratio_a, ratio_b) = f {
-                    if let RatioExpr::Quot {
-                        num: RatioAtom::Seg(seg_a),
-                        den: RatioAtom::Seg(seg_x1),
-                    } = ratio_a
+                    // Try each side as the "quotient" side (Quot(Seg,Seg)).
+                    for (quotient, rhs) in
+                        [(ratio_a, ratio_b), (ratio_b, ratio_a)]
                     {
-                        if Claim::norm_seg(seg_a) == na {
-                            for f2 in &all {
-                                if let Claim::RatioEq(ratio_c, ratio_d) = f2 {
-                                    if *ratio_b == *ratio_d {
-                                        if let RatioExpr::Quot {
-                                            num: RatioAtom::Seg(seg_b),
-                                            den: RatioAtom::Seg(seg_x2),
-                                        } = ratio_c
+                        if let RatioExpr::Quot {
+                            num: RatioAtom::Seg(seg_a),
+                            den: RatioAtom::Seg(seg_x1),
+                        } = quotient
+                        {
+                            if Claim::norm_seg(seg_a) == na {
+                                for f2 in &all {
+                                    if let Claim::RatioEq(rc, rd) = f2 {
+                                        // The other RatioEq must share the same
+                                        // common ratio `rhs` on one side, with
+                                        // the other side being Quot(Seg(b), Seg(x2)).
+                                        for (q2, other) in
+                                            [(rc, rd), (rd, rc)]
                                         {
-                                            let nb2 = Claim::norm_seg(seg_b);
-                                            let nx1 = Claim::norm_seg(seg_x1);
-                                            let nx2 = Claim::norm_seg(seg_x2);
-                                            if nb2 == nb && nx1 == nx2 {
-                                                return true;
-                                            }
-                                            // Also check if denominators are
-                                            // provably equal via SegEq.
-                                            if nb2 == nb && nx1 != nx2 {
-                                                if all.iter().any(|s| {
-                                                    matches!(
-                                                        s,
-                                                        Claim::SegEq(d1, d2)
-                                                            if (Claim::norm_seg(d1) == nx1
-                                                                && Claim::norm_seg(d2) == nx2)
-                                                                || (Claim::norm_seg(d1) == nx2
-                                                                    && Claim::norm_seg(d2) == nx1)
-                                                    )
-                                                }) {
-                                                    return true;
+                                            if *rhs == *q2 {
+                                                if let RatioExpr::Quot {
+                                                    num: RatioAtom::Seg(seg_b),
+                                                    den: RatioAtom::Seg(seg_x2),
+                                                } = other
+                                                {
+                                                    let nb2 = Claim::norm_seg(seg_b);
+                                                    let nx1 = Claim::norm_seg(seg_x1);
+                                                    let nx2 = Claim::norm_seg(seg_x2);
+                                                    if nb2 == nb && nx1 == nx2 {
+                                                        return true;
+                                                    }
+                                                    if nb2 == nb && nx1 != nx2 {
+                                                        if all.iter().any(|s| {
+                                                            matches!(
+                                                                s,
+                                                                Claim::SegEq(d1, d2)
+                                                                    if (Claim::norm_seg(d1) == nx1
+                                                                        && Claim::norm_seg(d2) == nx2)
+                                                                        || (Claim::norm_seg(d1) == nx2
+                                                                            && Claim::norm_seg(d2) == nx1)
+                                                            )
+                                                        }) {
+                                                            return true;
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -724,6 +1108,13 @@ pub fn numeric_solves(goal: &Claim, facts: &FactStore) -> bool {
             }
             false
         }
+        Claim::PredVal { name, args, value }
+            if name == "isacute"
+                && *value == Value::Bool(true)
+                && args.len() == 1 =>
+        {
+            acute_solves(&args[0], facts)
+        }
         _ => ratio_solves(goal, facts),
     }
 }
@@ -735,20 +1126,105 @@ pub fn numeric_solves(goal: &Claim, facts: &FactStore) -> bool {
 /// side lengths. Returns None unless all three sides are known.
 pub fn cos_of_vertex(tri: &str, vertex: char, facts: &FactStore) -> Option<f64> {
     let chars: Vec<char> = tri.chars().collect();
-    if chars.len() != 3 || !chars.contains(&vertex) {
+    if chars.len() != 3 || !chars.iter().any(|c| c.eq_ignore_ascii_case(&vertex)) {
         return None;
     }
-    let others: Vec<char> = chars.iter().copied().filter(|&c| c != vertex).collect();
+    let others: Vec<char> = chars.iter().copied().filter(|c| !c.eq_ignore_ascii_case(&vertex)).collect();
     if others.len() != 2 {
         return None;
     }
-    let adj1 = solve_len(&Claim::norm_seg(&format!("{}{}", vertex, others[0])), facts)? as f64;
-    let adj2 = solve_len(&Claim::norm_seg(&format!("{}{}", vertex, others[1])), facts)? as f64;
-    let opp = solve_len(&Claim::seg_key(&others[0].to_string(), &others[1].to_string()), facts)? as f64;
+    let v_upper = vertex.to_uppercase().next()?;
+    let seg_adj1 = Claim::norm_seg(&format!("{}{}", v_upper, others[0]));
+    let seg_adj2 = Claim::norm_seg(&format!("{}{}", v_upper, others[1]));
+    let seg_opp = Claim::seg_key(&others[0].to_string(), &others[1].to_string());
+
+    let mut adj1 = solve_len(&seg_adj1, facts).map(|n| n as f64);
+    let mut adj2 = solve_len(&seg_adj2, facts).map(|n| n as f64);
+    let mut opp = solve_len(&seg_opp, facts).map(|n| n as f64);
+
+    // For a right triangle, derive a missing side via Pythagoras.
+    // Identify the right-angle vertex from the fact store.
+    let tri_upper = tri.to_uppercase();
+    let right_vertex = facts.all().iter().find_map(|c| {
+        if let Claim::PredVal { name, args, value } = c {
+            if name == "rightat" && args.len() == 1 && args[0].eq_ignore_ascii_case(&tri_upper) {
+                if let Value::Point(p) = value {
+                    return p.chars().next();
+                }
+            }
+        }
+        None
+    });
+    if let Some(rv) = right_vertex {
+        // Identify the three sides of the triangle.
+        let a = chars[0];
+        let b = chars[1];
+        let c = chars[2];
+        let seg_ab = Claim::seg_key(&a.to_string(), &b.to_string());
+        let seg_bc = Claim::seg_key(&b.to_string(), &c.to_string());
+        let seg_ca = Claim::seg_key(&c.to_string(), &a.to_string());
+        let len_ab = solve_len(&seg_ab, facts).map(|n| n as f64);
+        let len_bc = solve_len(&seg_bc, facts).map(|n| n as f64);
+        let len_ca = solve_len(&seg_ca, facts).map(|n| n as f64);
+        // Hypotenuse = side opposite to the right-angle vertex (does NOT touch rv).
+        let all_segs = [(seg_ab.clone(), len_ab), (seg_bc.clone(), len_bc), (seg_ca.clone(), len_ca)];
+        let rv_upper = rv.to_ascii_uppercase();
+        let mut hyp_seg = String::new();
+        let mut hyp_len_val: Option<f64> = None;
+        let mut leg_segs: Vec<(String, Option<f64>)> = Vec::new();
+        for (seg, len) in &all_segs {
+            // A segment touches rv if rv is one of its endpoint chars.
+            let touches_rv = seg.chars().any(|ch| ch.to_ascii_uppercase() == rv_upper);
+            if !touches_rv {
+                hyp_seg = seg.clone();
+                hyp_len_val = *len;
+            } else {
+                leg_segs.push((seg.clone(), *len));
+            }
+        }
+        // Derive missing side: hyp^2 = leg1^2 + leg2^2.
+        let leg1 = leg_segs.get(0).and_then(|(_, l)| *l);
+        let leg2 = leg_segs.get(1).and_then(|(_, l)| *l);
+        if hyp_len_val.is_none() {
+            if let (Some(l1), Some(l2)) = (leg1, leg2) {
+                let h = (l1 * l1 + l2 * l2).sqrt();
+                if seg_opp == hyp_seg { opp = Some(h); }
+                if seg_adj1 == hyp_seg { adj1 = Some(h); }
+                if seg_adj2 == hyp_seg { adj2 = Some(h); }
+            }
+        } else if let Some(h) = hyp_len_val {
+            if leg1.is_none() {
+                if let Some(l2) = leg2 {
+                    let l1 = (h * h - l2 * l2).sqrt();
+                    let missing_seg = &leg_segs[0].0;
+                    if &seg_opp == missing_seg { opp = Some(l1); }
+                    if &seg_adj1 == missing_seg { adj1 = Some(l1); }
+                    if &seg_adj2 == missing_seg { adj2 = Some(l1); }
+                }
+            } else if leg2.is_none() {
+                if let Some(l1) = leg1 {
+                    let l2 = (h * h - l1 * l1).sqrt();
+                    let missing_seg = &leg_segs[1].0;
+                    if &seg_opp == missing_seg { opp = Some(l2); }
+                    if &seg_adj1 == missing_seg { adj1 = Some(l2); }
+                    if &seg_adj2 == missing_seg { adj2 = Some(l2); }
+                }
+            }
+        }
+        // Re-read after potential derivation.
+        if adj1.is_none() { adj1 = solve_len(&seg_adj1, facts).map(|n| n as f64); }
+        if adj2.is_none() { adj2 = solve_len(&seg_adj2, facts).map(|n| n as f64); }
+        if opp.is_none() { opp = solve_len(&seg_opp, facts).map(|n| n as f64); }
+    }
+
+    let adj1 = adj1?;
+    let adj2 = adj2?;
+    let opp = opp?;
     if adj1 <= 0.0 || adj2 <= 0.0 {
         return None;
     }
-    Some((adj1 * adj1 + adj2 * adj2 - opp * opp) / (2.0 * adj1 * adj2))
+    let cos_val = (adj1 * adj1 + adj2 * adj2 - opp * opp) / (2.0 * adj1 * adj2);
+    Some(cos_val)
 }
 
 /// Evaluate a `Sum` claim numerically: both sides must resolve to equal
@@ -832,6 +1308,170 @@ pub fn angle_degrees(tri: &str, vertex: char, facts: &FactStore) -> Option<f64> 
     let c = cos_of_vertex(tri, vertex, facts)?;
     Some(c.acos() * 180.0 / std::f64::consts::PI)
 }
+
+/// Compute the angle at `vertex` by trying every declared triangle that
+/// contains the vertex, returning the first successful result.
+pub fn angle_degrees_any(vertex: &str, facts: &FactStore) -> Option<(String, f64)> {
+    let vchar = vertex.chars().next()?;
+    for c in facts.all() {
+        if let Claim::PredVal { name, args, value } = c {
+            if name == "triangle" && value == Value::Bool(true) && args.len() == 1 {
+                if args[0].contains(vertex) {
+                    if let Some(deg) = angle_degrees(&args[0], vchar, facts) {
+                        return Some((args[0].clone(), deg));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Build a `Proof` tree for an angle derivation.
+///
+/// For a right triangle with right angle at apex `r`, if the angle vertex is
+/// `v` and the third vertex is `w`:
+///   - cos(v) = vw/vr (adjacent/hypotenuse) → v = arccos(vw/vr)
+///
+/// For a general triangle:
+///   - cos(v) = (vw² + vr² - wr²) / (2·vw·vr)  (law of cosines)
+///   - v = arccos(cos(v))
+///
+/// Returns `None` if the angle cannot be determined.
+pub fn angle_proof(vertex: &str, facts: &FactStore) -> Option<Proof> {
+    let vchar = vertex.chars().next()?;
+    // Find a triangle containing this vertex.
+    let (tri, _deg) = angle_degrees_any(vertex, facts)?;
+    let chars: Vec<char> = tri.chars().collect();
+    if chars.len() != 3 {
+        return None;
+    }
+    let vpos = chars.iter().position(|&c| c == vchar)?;
+    let r = chars[(vpos + 1) % 3];
+    let w = chars[(vpos + 2) % 3];
+
+    // Find the right-angle vertex if any.
+    let right_apex = facts.all().into_iter().find_map(|c| {
+        if let Claim::PredVal { name, args, value } = c {
+            if name == "rightat" && args.len() == 1 && args[0] == tri {
+                if let Value::Point(p) = value {
+                    return p.chars().next();
+                }
+            }
+        }
+        None
+    });
+
+    let seg_key = |a: char, b: char| -> String {
+        Claim::seg_key(&a.to_string(), &b.to_string())
+    };
+
+    if let Some(ra) = right_apex {
+        if ra == vchar {
+            // The angle at the right-angle vertex is always 90°.
+            let deg_val = 90.0f64;
+            return Some(Proof {
+                claim: Claim::pred(
+                    "angleeq",
+                    &[
+                        format!("{}{}{}", r, vchar, w).into(),
+                        format!("{}", deg_val as u32).into(),
+                    ],
+                    Value::Bool(true),
+                ),
+                antecedents: vec![Proof {
+                    claim: Claim::pred("rightat", &[tri.clone().into()], Value::Point(ra.to_string())),
+                    antecedents: vec![],
+                    rule: None,
+                }],
+                rule: Some("right-angle"),
+            });
+        }
+        // The angle is in a right triangle: use cos/sin/tan.
+        // Identify which of (r, w) is adjacent to the right angle.
+        let (adj_ch, hyp_ch) = if r == ra { (r, w) } else { (w, r) };
+        let adj_seg = seg_key(vchar, adj_ch);
+        let hyp_seg = seg_key(vchar, hyp_ch);
+        let adj_val = solve_len(&adj_seg, facts)?;
+        let hyp_val = solve_len(&hyp_seg, facts)?;
+        let cos_val = adj_val as f64 / hyp_val as f64;
+        let rad = cos_val.acos();
+        let computed_deg = rad * 180.0 / std::f64::consts::PI;
+        // The proof: cos(v) = adj/hyp → v = arccos(adj/hyp) = deg
+        return Some(Proof {
+            claim: Claim::pred(
+                "angleeq",
+                &[
+                    format!("{}{}{}", r, vchar, w).into(),
+                    format!("{:.2}", computed_deg).into(),
+                ],
+                Value::Bool(true),
+            ),
+            antecedents: vec![
+                Proof {
+                    claim: Claim::len_eq(&adj_seg, adj_val),
+                    antecedents: vec![],
+                    rule: None,
+                },
+                Proof {
+                    claim: Claim::len_eq(&hyp_seg, hyp_val),
+                    antecedents: vec![],
+                    rule: None,
+                },
+            ],
+            rule: Some("trig"),
+        });
+    }
+
+    // General triangle: law of cosines.
+    let vw = solve_len(&seg_key(vchar, w), facts)?;
+    let vr = solve_len(&seg_key(vchar, r), facts)?;
+    let wr = solve_len(&seg_key(r, w), facts)?;
+    let vw2 = vw * vw;
+    let vr2 = vr * vr;
+    let wr2 = wr * wr;
+    let num = (vw2 + vr2) as f64 - wr2 as f64;
+    let den = 2.0 * vw as f64 * vr as f64;
+    if den <= 0.0 {
+        return None;
+    }
+    let cos_val = num / den;
+    if cos_val < -1.0 || cos_val > 1.0 {
+        return None;
+    }
+    let rad = cos_val.acos();
+    let computed_deg = rad * 180.0 / std::f64::consts::PI;
+    Some(Proof {
+        claim: Claim::pred(
+            "angleeq",
+            &[
+                format!("{}{}{}", r, vchar, w).into(),
+                format!("{:.2}", computed_deg).into(),
+            ],
+            Value::Bool(true),
+        ),
+        antecedents: vec![
+            Proof {
+                claim: Claim::len_eq(&seg_key(vchar, w), vw),
+                antecedents: vec![],
+                rule: None,
+            },
+            Proof {
+                claim: Claim::len_eq(&seg_key(vchar, r), vr),
+                antecedents: vec![],
+                rule: None,
+            },
+            Proof {
+                claim: Claim::len_eq(&seg_key(r, w), wr),
+                antecedents: vec![],
+                rule: None,
+            },
+        ],
+        rule: Some("law-of-cosines"),
+    })
+}
+
+
 /// Premise strings for a `Sum` goal: every segment length (with its solved
 /// value) and every cosine (with its computed value) that the numeric
 /// evaluation relied on. Used to render a proof chain.
@@ -1824,7 +2464,7 @@ fn find_cos_vertex(e: &crate::ast::LenExpr) -> Option<char> {
     use crate::ast::LenExpr;
     match e {
         LenExpr::Trig(func, angle) if func == "cos" => angle.chars().next(),
-        LenExpr::Add(l, r) | LenExpr::Sub(l, r) | LenExpr::Mul(l, r) => {
+        LenExpr::Add(l, r) | LenExpr::Sub(l, r) | LenExpr::Mul(l, r) | LenExpr::Div(l, r) => {
             find_cos_vertex(l).or_else(|| find_cos_vertex(r))
         }
         LenExpr::Sq(inner) | LenExpr::Sqrt(inner) => find_cos_vertex(inner),
@@ -1878,7 +2518,7 @@ fn extract_sum_sq_sub_mul(e: &crate::ast::LenExpr) -> Option<(String, String)> {
                         if sign < 0 {
                             let mut leaves: Vec<&LenExpr> = Vec::new();
                             collect_mul_leaves(t, &mut leaves);
-                            let has2 = leaves.iter().any(|l| matches!(l, LenExpr::Num(2)));
+                            let has2 = leaves.iter().any(|l| matches!(l, LenExpr::Num(n) if (*n - 2.0).abs() < 1e-9));
                             let has_cos = leaves.iter().any(|l| matches!(l, LenExpr::Trig(f, _) if f == "cos"));
                             let segs: Vec<String> = leaves.iter().filter_map(|l| seg_of(l)).collect();
                             if !(has2 && has_cos) {
@@ -1901,6 +2541,9 @@ fn collect_mul_leaves<'a>(e: &'a crate::ast::LenExpr, out: &mut Vec<&'a crate::a
     if let crate::ast::LenExpr::Mul(l, r) = e {
         collect_mul_leaves(l, out);
         collect_mul_leaves(r, out);
+    } else if let crate::ast::LenExpr::Div(l, r) = e {
+        collect_mul_leaves(l, out);
+        collect_mul_leaves(r, out);
     } else {
         out.push(e);
     }
@@ -1916,13 +2559,44 @@ fn acute_solves(tri: &str, facts: &FactStore) -> bool {    let chars: Vec<char> 
         Claim::seg_key(&chars[1].to_string(), &chars[2].to_string()),
         Claim::seg_key(&chars[2].to_string(), &chars[0].to_string()),
     ];
-    let lens: Vec<u32> = match sides
-        .iter()
-        .map(|s| solve_len(s, facts))
-        .collect::<Vec<Option<u32>>>()
-    {
-        v if v.iter().all(|x| x.is_some()) => v.into_iter().map(|x| x.unwrap()).collect(),
-        _ => return false,
+    // Try integer lengths first.
+    let all_lens: Vec<Option<u32>> = sides.iter().map(|s| solve_len(s, facts)).collect();
+    let lens: Vec<u32> = if all_lens.iter().all(|x| x.is_some()) {
+        all_lens.into_iter().map(|x| x.unwrap()).collect()
+    } else {
+        // Fallback: try float lengths for non-integer sides, also
+        // derive from SqEq facts via sqrt.
+        let env = compute(facts);
+        let float_lens: Vec<Option<f64>> = sides
+            .iter()
+            .map(|s| {
+                if let Some(n) = solve_len(s, facts) {
+                    return Some(n as f64);
+                }
+                if let Some(v) = eval_len_expr(&crate::ast::LenExpr::Seg(s.clone()), facts) {
+                    return Some(v);
+                }
+                if let Some(&sq) = env.sq.get(s.as_str()) {
+                    return Some((sq as f64).sqrt());
+                }
+                let (pa, pb) = split_seg(s)?;
+                coord_distance(&pa, &pb, facts)
+            })
+            .collect();
+        if float_lens.iter().all(|x| x.is_some()) {
+            let fl: Vec<f64> = float_lens.into_iter().map(|x| x.unwrap()).collect();
+            // Convert to u32 via rounding for the uniform comparison.
+            return {
+                let mut sorted_f = fl;
+                sorted_f.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                if sorted_f[0] <= 0.0 {
+                    return false;
+                }
+                sorted_f[2] * sorted_f[2] < sorted_f[0] * sorted_f[0] + sorted_f[1] * sorted_f[1]
+            };
+        } else {
+            return false;
+        }
     };
     let mut sorted = lens.clone();
     sorted.sort_unstable();
@@ -2023,11 +2697,42 @@ pub fn numeric_proof(goal: &Claim, facts: &FactStore) -> Option<Proof> {
                 && *value == Value::Bool(true)
                 && args.len() == 1 =>
         {
-            if acute_solves(&args[0], facts) {
+            let tri = &args[0];
+            if acute_solves(tri, facts) {
+                // Build antecedents: side lengths using the same fallback
+                // chain as acute_solves (solve_len → eval_len_expr → coord_distance).
+                let chars: Vec<char> = tri.chars().collect();
+                let mut antecedents = Vec::new();
+                if chars.len() == 3 {
+                    let sides = [
+                        (chars[0], chars[1]),
+                        (chars[1], chars[2]),
+                        (chars[0], chars[2]),
+                    ];
+                    for &(a, b) in &sides {
+                        let seg = Claim::seg_key(&a.to_string(), &b.to_string());
+                        // Try solve_len first, then eval_len_expr, then coord_distance.
+                        let n = solve_len(&seg, facts)
+                            .map(|v| v as f64)
+                            .or_else(|| eval_len_expr(&crate::ast::LenExpr::Seg(seg.clone()), facts))
+                            .or_else(|| {
+                                let (pa, pb) = split_seg(&seg)?;
+                                coord_distance(&pa, &pb, facts)
+                            });
+                        if let Some(n_f) = n {
+                            let n_u = n_f.round() as u32;
+                            antecedents.push(Proof {
+                                claim: Claim::len_eq(&seg, n_u),
+                                antecedents: Vec::new(),
+                                rule: None,
+                            });
+                        }
+                    }
+                }
                 Some(Proof {
                     claim: goal.clone(),
                     rule: Some("numeric-angle"),
-                    antecedents: Vec::new(),
+                    antecedents,
                 })
             } else {
                 None
@@ -2037,12 +2742,12 @@ pub fn numeric_proof(goal: &Claim, facts: &FactStore) -> Option<Proof> {
     }
 }
 
-fn explain_len(env: &NumericEnv, seg: &str, n: u32) -> Proof {
+pub fn explain_len(env: &NumericEnv, seg: &str, n: u32) -> Proof {
     let mut path = Vec::new();
     explain_len_d(env, seg, n, &mut path)
 }
 
-fn explain_sq(env: &NumericEnv, seg: &str, v: u32) -> Proof {
+pub fn explain_sq(env: &NumericEnv, seg: &str, v: u32) -> Proof {
     let mut path = Vec::new();
     explain_sq_d(env, seg, v, &mut path)
 }
@@ -2232,7 +2937,7 @@ fn ratio_inputs(e: &RatioExpr, env: &NumericEnv) -> Vec<Proof> {
     out
 }
 
-/// Rational number with arbitrary precision (using i64).
+/// Rational number using i64 for coordinate arithmetic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rational {
     num: i64,
@@ -2558,8 +3263,289 @@ pub fn eval_atom(a: &RatioAtom, coords: &LineCoords) -> Option<(i64, i64)> {
     }
 }
 
+/// Build a 2D coordinate model from the facts and compute a float distance
+/// between two points. Returns None if coordinates cannot be determined.
+///
+/// The model places the first known triangle in the plane: vertex1 at (0,0),
+/// vertex2 on the x-axis, vertex3 in the upper half-plane. Then it propagates
+/// coordinates through:
+///   - Perpendicular foot (projection onto a line)
+///   - Midpoint
+///   - Point on ray at a given distance
+///   - Intersection of a line with a segment
+fn coord_distance(a: &str, b: &str, facts: &FactStore) -> Option<f64> {
+    use std::collections::HashMap;
 
+    let mut pos: HashMap<String, (f64, f64)> = HashMap::new();
 
+    // Helper: distance between two named points.
+    let dist = |pos: &HashMap<String, (f64, f64)>, p: &str, q: &str| -> Option<f64> {
+        let (px, py) = pos.get(p)?;
+        let (qx, qy) = pos.get(q)?;
+        Some(((px - qx).powi(2) + (py - qy).powi(2)).sqrt())
+    };
 
+    // 1. Find a declared triangle with all three sides known (float).
+    //    Prefer a triangle that contains the queried points a or b.
+    let mut tri_info: Option<(String, f64, f64, f64)> = None;
+    for c in facts.all() {
+        if let Claim::PredVal { name, args, value } = c {
+            if name == "triangle" && value == Value::Bool(true) && args.len() == 1 {
+                let tri = &args[0];
+                let chs: Vec<char> = tri.chars().collect();
+                if chs.len() == 3 {
+                    let s0 = Claim::seg_key(&chs[0].to_string(), &chs[1].to_string());
+                    let s1 = Claim::seg_key(&chs[1].to_string(), &chs[2].to_string());
+                    let s2 = Claim::seg_key(&chs[2].to_string(), &chs[0].to_string());
+                    let l0 = solve_len(&s0, facts).map(|x| x as f64)
+                        .or_else(|| eval_len_expr(&LenExpr::Seg(s0), facts));
+                    let l1 = solve_len(&s1, facts).map(|x| x as f64)
+                        .or_else(|| eval_len_expr(&LenExpr::Seg(s1), facts));
+                    let l2 = solve_len(&s2, facts).map(|x| x as f64)
+                        .or_else(|| eval_len_expr(&LenExpr::Seg(s2), facts));
+                    if let (Some(ab_len), Some(bc_len), Some(ca_len)) = (l0, l1, l2) {
+                        if ab_len > 0.0 && bc_len > 0.0 && ca_len > 0.0 {
+                            let tri_has_ab = tri.contains(a) || tri.contains(b);
+                            if tri_has_ab {
+                                tri_info = Some((tri.clone(), ab_len, bc_len, ca_len));
+                                break;
+                            } else if tri_info.is_none() {
+                                tri_info = Some((tri.clone(), ab_len, bc_len, ca_len));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let (tri, ab, bc, ca) = tri_info?;
+    let chs: Vec<char> = tri.chars().collect();
+    let (p0, p1, p2) = (chs[0].to_string(), chs[1].to_string(), chs[2].to_string());
+    // Place p0 at origin, p1 on x-axis at distance ab.
+    pos.insert(p0.clone(), (0.0, 0.0));
+    pos.insert(p1.clone(), (ab, 0.0));
+    // p2: intersect circles centered at p0 (radius ca) and p1 (radius bc).
+    // x = (ab^2 + ca^2 - bc^2) / (2*ab)
+    let x2 = (ab * ab + ca * ca - bc * bc) / (2.0 * ab);
+    let y2_sq = ca * ca - x2 * x2;
+    if y2_sq < 0.0 {
+        return None;
+    }
+    pos.insert(p2.clone(), (x2, y2_sq.sqrt()));
 
+    // 2. Propagate coordinates through construction facts.
+    // We run multiple passes since later constructions depend on earlier ones.
+    for _ in 0..16 {
+        let before = pos.len();
+        for c in facts.all() {
+            match c {
+                // Perpendicular foot: H = Intersection(BC, PerpendicularLine(A, BC))
+                // creates: OnSegment(h, bc), IsPerpendicular(ah, bc)
+                // We derive H as the projection of A onto line BC.
+                Claim::OnSegment(h, seg) => {
+                    if pos.contains_key(&h) { continue; }
+                    if let Some((a, b)) = split_seg(&seg) {
+                        if let (Some(pa), Some(pb)) = (pos.get(&a), pos.get(&b)) {
+                            // Project h onto the line pa-pb if h is the foot
+                            // of a perpendicular. Check if there's a
+                            // IsPerpendicular(xh, seg) fact.
+                            let hch = h.chars().next().unwrap_or('\0');
+                            let mut is_foot = false;
+                            let mut from_pt = String::new();
+                            for c2 in facts.all() {
+                                if let Claim::PredVal { name, args, value }
+                                    = c2
+                                {
+                                    if name == "isperpendicular"
+                                        && value == Value::Bool(true)
+                                        && args.len() == 2
+                                    {
+                                        // args[0] = segment like "ah", args[1] = base like "bc"
+                                        let seg0 = Claim::norm_seg(&args[0]);
+                                        let seg1 = Claim::norm_seg(&args[1]);
+                                        if seg1 == Claim::norm_seg(&seg) {
+                                            // Check if seg0 contains h
+                                            let pts: Vec<char> = seg0.chars().collect();
+                                            if pts.len() == 2
+                                                && (pts[0] == hch || pts[1] == hch)
+                                            {
+                                                let other = if pts[0] == hch {
+                                                    pts[1]
+                                                } else {
+                                                    pts[0]
+                                                };
+                                                if pos.contains_key(
+                                                    &other.to_string(),
+                                                ) {
+                                                    is_foot = true;
+                                                    from_pt =
+                                                        other.to_string();
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if is_foot {
+                                // Project from_pt onto line pa-pb.
+                                if let Some(pf) = pos.get(&from_pt) {
+                                    let dx = pb.0 - pa.0;
+                                    let dy = pb.1 - pa.1;
+                                    let len_sq = dx * dx + dy * dy;
+                                    if len_sq > 0.0 {
+                                        let t = ((pf.0 - pa.0) * dx
+                                            + (pf.1 - pa.1) * dy)
+                                            / len_sq;
+                                        pos.insert(
+                                            h.to_string(),
+                                            (pa.0 + t * dx, pa.1 + t * dy),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Midpoint: M = Midpoint(A, B) creates OnSegment(m, ab)
+                // and SegEq(ma, mb). We derive M as the midpoint.
+                Claim::PredVal { name, args, value }
+                    if name == "ismedian" && value == Value::Bool(true) =>
+                {
+                    if args.len() == 2 {
+                        let mid = &args[0];
+                        let seg = Claim::norm_seg(&args[1]);
+                        if pos.contains_key(mid) { continue; }
+                        if let Some((a, b)) = split_seg(&seg) {
+                            if let (Some(pa), Some(pb)) =
+                                (pos.get(&a), pos.get(&b))
+                            {
+                                pos.insert(
+                                    mid.clone(),
+                                    ((pa.0 + pb.0) / 2.0, (pa.1 + pb.1) / 2.0),
+                                );
+                            }
+                        }
+                    }
+                }
+                // On(p, seg) for points on a line (not necessarily a segment).
+                // If the point is the intersection of a perpendicular line with
+                // a base, project the other endpoint onto the line.
+                Claim::On(p, seg) => {
+                    if pos.contains_key(&p) { continue; }
+                    if let Some((a, b)) = split_seg(&seg) {
+                        if let (Some(pa), Some(pb)) = (pos.get(&a), pos.get(&b)) {
+                            let pch = p.chars().next().unwrap_or('\0');
+                            let mut is_foot = false;
+                            let mut from_pt = String::new();
+                            for c2 in facts.all() {
+                                if let Claim::PredVal { name, args, value } = c2 {
+                                    if name == "isperpendicular"
+                                        && value == Value::Bool(true)
+                                        && args.len() == 2
+                                    {
+                                        let seg0 = Claim::norm_seg(&args[0]);
+                                        let seg1 = Claim::norm_seg(&args[1]);
+                                        if seg1 == Claim::norm_seg(&seg) {
+                                            let pts: Vec<char> = seg0.chars().collect();
+                                            if pts.len() == 2
+                                                && (pts[0] == pch || pts[1] == pch)
+                                            {
+                                                let other = if pts[0] == pch { pts[1] } else { pts[0] };
+                                                if pos.contains_key(&other.to_string()) {
+                                                    is_foot = true;
+                                                    from_pt = other.to_string();
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if is_foot {
+                                if let Some(pf) = pos.get(&from_pt) {
+                                    let dx = pb.0 - pa.0;
+                                    let dy = pb.1 - pa.1;
+                                    let len_sq = dx * dx + dy * dy;
+                                    if len_sq > 0.0 {
+                                        let t = ((pf.0 - pa.0) * dx + (pf.1 - pa.1) * dy) / len_sq;
+                                        pos.insert(p.to_string(), (pa.0 + t * dx, pa.1 + t * dy));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Second pass: resolve points on lines at specific distances
+        // (e.g., PointOn(Ray(H,C)) with HK=BI).
+        for c in facts.all() {
+            if let Claim::On(p, seg) = c {
+                if pos.contains_key(&p) { continue; }
+                let pch = p.chars().next().unwrap_or('\0');
+                if let Some((a, b)) = split_seg(&seg) {
+                    // Look for a SegEq constraint: SegEq(px, qy) where
+                    // px or py contains p.
+                    for c2 in facts.all() {
+                        if let Claim::SegEq(s1, s2) = c2 {
+                            let pts1: Vec<char> = s1.chars().collect();
+                            let pts2: Vec<char> = s2.chars().collect();
+                            let dist_val: Option<f64>;
+                            // Check if s1 or s2 contains p
+                            let (other_seg, _this_seg) =
+                                if pts1.len() == 2 && pts1[0] == pch {
+                                    (s2.as_str(), s1.as_str())
+                                } else if pts1.len() == 2 && pts1[1] == pch {
+                                    (s2.as_str(), s1.as_str())
+                                } else if pts2.len() == 2 && pts2[0] == pch {
+                                    (s1.as_str(), s2.as_str())
+                                } else if pts2.len() == 2 && pts2[1] == pch {
+                                    (s1.as_str(), s2.as_str())
+                                } else {
+                                    continue;
+                                };
+                            // other_seg should have both endpoints known.
+                            if let Some((oa, ob)) = split_seg(other_seg) {
+                                if let (Some(poa), Some(pob)) = (pos.get(&oa), pos.get(&ob)) {
+                                    dist_val = Some(((poa.0 - pob.0).powi(2) + (poa.1 - pob.1).powi(2)).sqrt());
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            }
+                            let d = dist_val.unwrap_or(0.0);
+                            if d <= 0.0 { continue; }
+                            // Place p on line (a, b) at distance d from one endpoint.
+                            if let (Some(pa), Some(pb)) = (pos.get(&a), pos.get(&b)) {
+                                let dx = pb.0 - pa.0;
+                                let dy = pb.1 - pa.1;
+                                let len = (dx * dx + dy * dy).sqrt();
+                                if len > 0.0 {
+                                    let ux = dx / len;
+                                    let uy = dy / len;
+                                    // Try both directions.
+                                    let k1 = (pa.0 + d * ux, pa.1 + d * uy);
+                                    let k2 = (pa.0 - d * ux, pa.1 - d * uy);
+                                    // Pick the one in the direction of the other endpoint.
+                                    let dot1 = (k1.0 - pa.0) * ux + (k1.1 - pa.1) * uy;
+                                    let dot2 = (k2.0 - pa.0) * ux + (k2.1 - pa.1) * uy;
+                                    pos.insert(p.to_string(), if dot1 >= dot2 { k1 } else { k2 });
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if pos.len() == before {
+            break;
+        }
+    }
 
+    // 3. Compute distance.
+    dist(&pos, a, b)
+}

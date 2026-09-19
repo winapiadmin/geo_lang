@@ -19,8 +19,8 @@ prove:
 4. MN=NP=PQ=QM
 5. Intersection(MP,NQ)=Z
 6. FG=GH=HI=IF
-7. FH=AB
-8. GI=BC
+7. FH=BC
+8. GI=AB
 proof[3]:
 AZ=BZ=CZ=DZ -> AZ^2=BZ^2=CZ^2=DZ^2 -> AZ^2+BZ^2+CZ^2+DZ^2=4*AZ^2
 RightAt(ABC)=B -> AB^2+BC^2=AC^2=(2*AZ)^2=4*AZ^2

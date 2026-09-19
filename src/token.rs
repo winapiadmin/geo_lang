@@ -5,10 +5,10 @@
 //! language. Case is not significant anywhere in the language, so keywords
 //! are matched case-insensitively by the parser.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TokKind {
     Ident(String),
-    Number(u32),
+    Number(f64),
     /// Single-character punctuation such as `( ) [ ] = , . : !`
     Symbol(char),
     /// The `->` implication arrow.
@@ -21,7 +21,7 @@ pub enum TokKind {
     Eof,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub kind: TokKind,
     /// 1-based line number.
@@ -140,28 +140,31 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, LexError> {
             continue;
         }
 
-        // Numbers.
+        // Numbers (integers and decimals).
         if c.is_ascii_digit() {
             let start_col = col;
-            let mut val: u32 = 0;
+            let mut val_str = String::new();
             while i < bytes.len() && bytes[i].is_ascii_digit() {
-                let digit = bytes[i] as u32 - '0' as u32;
-                val = match val
-                    .checked_mul(10)
-                    .and_then(|v| v.checked_add(digit))
-                {
-                    Some(v) => v,
-                    None => {
-                        return Err(LexError {
-                            line,
-                            col,
-                            msg: "number too large (maximum is u32::MAX)".to_string(),
-                        });
-                    }
-                };
+                val_str.push(bytes[i]);
                 i += 1;
                 col += 1;
             }
+            // Check for decimal point followed by digits.
+            if i < bytes.len() && bytes[i] == '.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                val_str.push('.');
+                i += 1;
+                col += 1;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    val_str.push(bytes[i]);
+                    i += 1;
+                    col += 1;
+                }
+            }
+            let val: f64 = val_str.parse().map_err(|_| LexError {
+                line,
+                col: start_col,
+                msg: format!("invalid number: {}", val_str),
+            })?;
             toks.push(Token {
                 kind: TokKind::Number(val),
                 line,

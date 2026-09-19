@@ -7,3 +7,9 @@ antecedents:
 requires:
 consequent:
   - SegEq(Seg2(P,M), Seg2(P,H))
+chain:
+  IsMedian(E, Seg2(H,M)) &&
+  IsPerpendicular(Seg2(H,E), Seg2(A,B)) &&
+  On(P, Seg2(A,B))
+  ->
+  SegEq(Seg2(P,M), Seg2(P,H))

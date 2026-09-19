@@ -8,3 +8,10 @@ antecedents:
 requires:
 consequent:
   - AngleEq(Angle(H,J,M), Angle(H,Q2,B))
+chain:
+  IsParallel(Seg2(M,N), Seg2(B,C)) &&
+  On(J, Seg2(M,N)) &&
+  On(Q2, Seg2(B,C)) &&
+  On(M, Seg2(H,B))
+  ->
+  AngleEq(Angle(H,J,M), Angle(H,Q2,B))

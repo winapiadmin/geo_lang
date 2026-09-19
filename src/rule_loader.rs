@@ -13,11 +13,75 @@ pub fn load_rules_from_dir(dir: &Path) -> Result<Vec<Rule>, String> {
         let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("geo") {
-            let rule = parse_rule_file(&path)?;
-            rules.push(rule);
+            match parse_rule_file(&path) {
+                Ok(rule) => rules.push(rule),
+                Err(e) => eprintln!("warning: skipping rule {}: {}", path.display(), e),
+            }
         }
     }
+    rules.sort_by_key(|rule| {
+        let priority = match rule.id {
+            "equal-implies-similar" => 0,
+            "ratio-to-similarity" => 1,
+            "aa-similarity" => 2,
+            "sas-similarity" => 3,
+            "sss-similarity" => 4,
+            _ => 100,
+        };
+        (priority, rule.id.to_string())
+    });
+    validate_chain_metadata(&rules)?;
     Ok(rules)
+}
+
+/// Validate the rule references embedded in explicit fallback chains.
+///
+/// The claim text is intentionally kept opaque for now because it is rendered
+/// by the prover, but every annotated rule reference must resolve and may not
+/// point back to the rule declaring the fallback.
+fn validate_chain_metadata(rules: &[Rule]) -> Result<(), String> {
+    let known: std::collections::HashSet<&str> = rules.iter().map(|r| r.id).collect();
+    for rule in rules {
+        let Some(chain) = rule.chain else { continue };
+        let steps = parse_fallback_chain(chain).map_err(|error| {
+            format!("rule {} has invalid fallback chain: {}", rule.id, error)
+        })?;
+        let final_claim = steps
+            .last()
+            .and_then(|step| step.claims.first())
+            .ok_or_else(|| format!("rule {} has an empty fallback chain", rule.id))?;
+        if final_claim != &rule.consequent {
+            return Err(format!(
+                "rule {} fallback must end with its declared consequent",
+                rule.id
+            ));
+        }
+        let mut rest = chain;
+        while let Some(start) = rest.find('[') {
+            let after = &rest[start + 1..];
+            let Some(end) = after.find(']') else {
+                return Err(format!(
+                    "rule {} has malformed fallback chain: missing ']': {}",
+                    rule.id, chain
+                ));
+            };
+            let referenced = after[..end].trim();
+            if referenced.is_empty() || !known.contains(referenced) {
+                return Err(format!(
+                    "rule {} fallback references unknown rule '{}'",
+                    rule.id, referenced
+                ));
+            }
+            if referenced == rule.id {
+                return Err(format!(
+                    "rule {} fallback cannot reference itself",
+                    rule.id
+                ));
+            }
+            rest = &after[end + 1..];
+        }
+    }
+    Ok(())
 }
 
 /// Parse a single rule .geo file.
@@ -25,6 +89,72 @@ fn parse_rule_file(path: &Path) -> Result<Rule, String> {
     let content = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let rule = parse_rule(&content, path)?;
     Ok(rule)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FallbackStep {
+    pub claims: Vec<PClaim>,
+    pub rule_id: Option<String>,
+}
+
+/// Parse the claim steps in a rule fallback chain.
+pub(crate) fn parse_fallback_chain(chain: &str) -> Result<Vec<FallbackStep>, String> {
+    split_top_level(chain, "->")
+        .into_iter()
+        .map(|step| step.trim().to_string())
+        .filter(|step| !step.is_empty())
+        .map(|step| {
+            let (claim, rule_id) = if let Some((claim, annotation)) = step.split_once('[') {
+                let rule_id = annotation
+                    .strip_suffix(']')
+                    .ok_or_else(|| format!("malformed fallback annotation: {step}"))?
+                    .trim();
+                if rule_id.is_empty() {
+                    return Err(format!("empty fallback rule annotation: {step}"));
+                }
+                (claim.trim().to_string(), Some(rule_id.to_string()))
+            } else {
+                (step.to_string(), None)
+            };
+            let claim = claim.trim();
+            let claims = split_top_level(claim, "&&")
+                .into_iter()
+                .map(|part| parse_claim(part.trim(), "chain", Path::new("<chain>")))
+                .collect::<Result<Vec<_>, _>>()?;
+            if claims.is_empty() {
+                return Err(format!("empty fallback proof step: {step}"));
+            }
+            Ok(FallbackStep {
+                claims,
+                rule_id,
+            })
+        })
+        .collect()
+}
+
+fn split_top_level(input: &str, separator: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth: usize = 0;
+    let bytes = input.as_bytes();
+    let sep = separator.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 && bytes.get(i..i + sep.len()) == Some(sep) {
+            parts.push(input[start..i].to_string());
+            i += sep.len();
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    parts.push(input[start..].to_string());
+    parts
 }
 
 /// Parse a rule from string content.
@@ -39,6 +169,7 @@ fn parse_rule_file(path: &Path) -> Result<Rule, String> {
 ///   - ...
 /// consequent:
 ///   - PredicateName(arg1, ...)
+/// chain: step1 [rule1] -> step2 [rule2] -> ...
 /// ```
 fn parse_rule(content: &str, path: &Path) -> Result<Rule, String> {
     let mut lines = content.lines().peekable();
@@ -46,6 +177,7 @@ fn parse_rule(content: &str, path: &Path) -> Result<Rule, String> {
     let mut antecedents = Vec::new();
     let mut requires = Vec::new();
     let mut consequent: Option<PClaim> = None;
+    let mut chain: Option<String> = None;
 
     while let Some(line) = lines.next() {
         let line = line.trim();
@@ -60,6 +192,39 @@ fn parse_rule(content: &str, path: &Path) -> Result<Rule, String> {
             requires = parse_claim_list(&mut lines, "requires", path)?;
         } else if line == "consequent:" {
             consequent = Some(parse_single_claim(&mut lines, "consequent", path)?);
+        } else if let Some(rest) = line.strip_prefix("chain:") {
+            let first = rest.trim();
+            if !first.is_empty() {
+                chain = Some(first.to_string());
+            } else {
+                let mut parts = Vec::new();
+                while let Some(next) = lines.peek() {
+                    let next = next.trim();
+                    if next.is_empty() {
+                        lines.next();
+                        continue;
+                    }
+                    if matches!(
+                        next,
+                        "antecedents:" | "requires:" | "consequent:" | "chain:"
+                    ) || next.starts_with("rule:")
+                    {
+                        break;
+                    }
+                    let part = if let Some(rest) = next.strip_prefix("- ") {
+                        rest.trim()
+                    } else if next.starts_with('-') && !next.starts_with("->") {
+                        next[1..].trim()
+                    } else {
+                        next
+                    };
+                    parts.push(part.to_string());
+                    lines.next();
+                }
+                if !parts.is_empty() {
+                    chain = Some(parts.join(" "));
+                }
+            }
         }
     }
 
@@ -70,11 +235,15 @@ fn parse_rule(content: &str, path: &Path) -> Result<Rule, String> {
         return Err(format!("{}: missing consequent", path.display()));
     }
 
+    // Leak the chain string so it has a 'static lifetime.
+    let chain_static: Option<&'static str> = chain.map(|s| &*Box::leak(s.into_boxed_str()));
+
     Ok(Rule {
         id: Box::leak(rule_id.into_boxed_str()),
         antecedents,
         requires,
         consequent: consequent.unwrap(),
+        chain: chain_static,
     })
 }
 
@@ -107,7 +276,7 @@ fn parse_claim_list(
 }
 
 /// Parse a single claim from a line.
-fn parse_claim(line: &str, section: &str, path: &Path) -> Result<PClaim, String> {
+pub(crate) fn parse_claim(line: &str, section: &str, path: &Path) -> Result<PClaim, String> {
     let line = line.trim();
     
     // Check for assignment (=)
@@ -123,9 +292,15 @@ fn parse_claim(line: &str, section: &str, path: &Path) -> Result<PClaim, String>
 /// Parse a predicate with a value (e.g., Predicate(args) = true)
 fn parse_predicate_with_value(left: &str, right: &str, section: &str, path: &Path) -> Result<PClaim, String> {
     let (name, args) = parse_predicate_name_args(left)?;
-    let value = parse_value(right)?;
-    
     let name_lower = name.to_lowercase();
+    if name_lower == "intersection" {
+        if args.len() != 2 {
+            return Err(format!("{}: {section}: Intersection needs 2 args", path.display()));
+        }
+        return Ok(PClaim::PredAt("intersection".into(), args, parse_pexpr(right)?));
+    }
+
+    let value = parse_value(right)?;
     if name_lower == "iscollinear" {
         if args.len() != 3 {
             return Err(format!("{}: {section}: IsCollinear needs 3 args", path.display()));
@@ -261,6 +436,8 @@ fn parse_predicate(line: &str, section: &str, path: &Path) -> Result<PClaim, Str
         || name_lower == "isperpendicular" || name_lower == "isparallel"
         || name_lower == "issimilar" || name_lower == "isisosceles"
         || name_lower == "isright" || name_lower == "isparallelogram"
+        || name_lower == "iscollinear" || name_lower == "isacute"
+        || name_lower == "iscirclecenter"
         || name_lower == "parallelogram" {
         Ok(PClaim::PredVal(name.to_lowercase(), args, Value::Bool(true)))
     } else if name_lower == "onsamecircle" {

@@ -5,3 +5,7 @@ antecedents:
 requires:
 consequent:
   - IsPerpendicular(Seg2(A,H), Seg2(B,C))
+chain:
+  IsAltitude(Seg2(A,H), Seg2(B,C))
+  ->
+  IsPerpendicular(Seg2(A,H), Seg2(B,C))

@@ -6,3 +6,8 @@ antecedents:
 requires:
 consequent:
   - SegEq(Seg2(A,B), Seg2(A,C))
+chain:
+  SegEq(AnyRef(X), Seg2(A,B)) &&
+  SegEq(AnyRef(X), Seg2(A,C))
+  ->
+  SegEq(Seg2(A,B), Seg2(A,C))

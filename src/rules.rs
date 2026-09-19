@@ -71,6 +71,10 @@ pub struct Rule {
     /// Side conditions that must already be facts (not shown in the chain).
     pub requires: Vec<PClaim>,
     pub consequent: PClaim,
+    /// Fallback proof chain template used when this rule is disabled.
+    /// Format: `"step1 [rule1] -> step2 [rule2] -> ..."` where each step
+    /// can reference variables bound by the rule's antecedent matching.
+    pub chain: Option<&'static str>,
 }
 
 pub type Bindings = HashMap<String, String>;
@@ -98,35 +102,73 @@ pub fn match_expr(refval: &str, e: &PExpr, bind: &Bindings) -> Vec<Bindings> {
             try_bind(v, refval, bind)
         }
         PExpr::Seg2(v1, v2) => {
-            // Handle both legacy 2-char segments ("ab") and multi-char with delimiter ("p1-p2")
-            let (a, b) = if refval.contains('-') {
+            // Handle legacy 2-char segments ("ab"), multi-char with delimiter
+            // ("p1-p2"), and bare segment references from ratios ("jk1").
+            let pairs: Vec<(String, String)> = if refval.contains('-') {
                 let parts: Vec<&str> = refval.split('-').collect();
                 if parts.len() == 2 {
-                    (parts[0].to_string(), parts[1].to_string())
+                    vec![(parts[0].to_string(), parts[1].to_string())]
                 } else {
                     return vec![];
                 }
             } else if refval.len() == 2 {
-                (refval[0..1].to_string(), refval[1..2].to_string())
+                vec![(refval[0..1].to_string(), refval[1..2].to_string())]
             } else {
-                return vec![];
+                // Bare reference like "jk1" — try every split position.
+                let mut v = Vec::new();
+                for i in 1..refval.len() {
+                    v.push((refval[..i].to_string(), refval[i..].to_string()));
+                }
+                v
             };
             let mut out = Vec::new();
-            if let Some(fb) = try_bind(v1, &a, bind).into_iter().next() {
-                out.extend(try_bind(v2, &b, &fb));
-            }
-            if let Some(fb) = try_bind(v1, &b, bind).into_iter().next() {
-                out.extend(try_bind(v2, &a, &fb));
+            for (a, b) in &pairs {
+                if let Some(fb) = try_bind(v1, a, bind).into_iter().next() {
+                    out.extend(try_bind(v2, b, &fb));
+                }
+                if let Some(fb) = try_bind(v1, b, bind).into_iter().next() {
+                    out.extend(try_bind(v2, a, &fb));
+                }
             }
             out
         }
         PExpr::Tri3(v1, v2, v3) => {
-            if refval.len() == 3 {
+            let mut pts = Vec::new();
+            let mut i = 0;
+            while i < refval.len() {
+                let start = i;
+                if !refval[i..].chars().next().unwrap().is_ascii_alphabetic() {
+                    i += 1;
+                    continue;
+                }
+                i += 1;
+                while i < refval.len() && refval[i..].chars().next().unwrap().is_ascii_digit() {
+                    i += 1;
+                }
+                pts.push(refval[start..i].to_string());
+            }
+            if pts.len() == 3 {
+                let mut out = Vec::new();
+                let mut perm = pts.clone();
+                permute(&mut perm, 0, &mut |perm| {
+                    let mut cur = vec![bind.clone()];
+                    for (var, pt) in [(v1, &perm[0]), (v2, &perm[1]), (v3, &perm[2])] {
+                        let mut next = Vec::new();
+                        for b in &cur {
+                            next.extend(try_bind(var, pt, b));
+                        }
+                        cur = next;
+                        if cur.is_empty() {
+                            return;
+                        }
+                    }
+                    out.extend(cur);
+                });
+                out
+            } else if refval.len() == 3 {
                 let a = refval[0..1].to_string();
                 let b = refval[1..2].to_string();
                 let c = refval[2..3].to_string();
-                // Angles normalize their two arms (first and third char), so
-                // try both arm orders as well as the positional order.
                 let mut out: Vec<Bindings> = try_bind(v1, &a, bind);
                 out = out
                     .iter()
@@ -176,6 +218,19 @@ pub fn match_expr(refval: &str, e: &PExpr, bind: &Bindings) -> Vec<Bindings> {
     }
 }
 
+/// Generate all permutations of `xs[start..]`, calling `f` for each.
+fn permute(xs: &mut Vec<String>, start: usize, f: &mut dyn FnMut(&[String])) {
+    if start >= xs.len() {
+        f(xs);
+        return;
+    }
+    for i in start..xs.len() {
+        xs.swap(start, i);
+        permute(xs, start + 1, f);
+        xs.swap(start, i);
+    }
+}
+
 /// Match a claim against a claim pattern, enumerating bindings.
 pub fn match_pat(claim: &Claim, pat: &PClaim, bind: &Bindings) -> Vec<Bindings> {
     match (claim, pat) {
@@ -194,7 +249,7 @@ pub fn match_pat(claim: &Claim, pat: &PClaim, bind: &Bindings) -> Vec<Bindings> 
         (
             Claim::PredVal { name, args, value },
             PClaim::PredVal(pn, pargs, pv),
-        ) if name == pn && value == pv && args.len() == pargs.len() => {
+        ) if crate::claim::normalize_pred_name(name) == crate::claim::normalize_pred_name(pn) && value == pv && args.len() == pargs.len() => {
             let mut out = Vec::new();
             let mut cur = vec![bind.clone()];
             for (arg, pe) in args.iter().zip(pargs.iter()) {
@@ -210,7 +265,7 @@ pub fn match_pat(claim: &Claim, pat: &PClaim, bind: &Bindings) -> Vec<Bindings> 
             let symmetric = args.len() == 2
                 && matches!(
                     name.as_str(),
-                    "isparallel" | "isperpendicular" | "isequal" | "equals"
+                    "isparallel" | "isperpendicular" | "isequal" | "equals" | "issimilar"
                 );
             if symmetric {
                 let mut cur = vec![bind.clone()];
@@ -228,7 +283,7 @@ pub fn match_pat(claim: &Claim, pat: &PClaim, bind: &Bindings) -> Vec<Bindings> 
         (
             Claim::PredVal { name, args, value },
             PClaim::PredAt(pn, pargs, pe),
-        ) if name == pn && args.len() == pargs.len() => {
+        ) if crate::claim::normalize_pred_name(name) == crate::claim::normalize_pred_name(pn) && args.len() == pargs.len() => {
             let mut cur = vec![bind.clone()];
             for (arg, pexpr) in args.iter().zip(pargs.iter()) {
                 let mut next = Vec::new();
@@ -290,18 +345,26 @@ pub fn match_pat(claim: &Claim, pat: &PClaim, bind: &Bindings) -> Vec<Bindings> 
             if pts.len() != pps.len() {
                 return vec![];
             }
-            let mut cur = vec![bind.clone()];
-            for (pt, pp) in pts.iter().zip(pps.iter()) {
-                let mut next = Vec::new();
-                for b in &cur {
-                    next.extend(match_expr(pt, pp, b));
+            // Try all permutations so sorted OnSameCircle facts can match
+            // rules that assume a specific geometric ordering (e.g. diameter
+            // endpoints at specific positions).
+            let mut out = Vec::new();
+            let mut perm = pts.clone();
+            permute(&mut perm, 0, &mut |perm| {
+                let mut cur = vec![bind.clone()];
+                for (pt, pp) in perm.iter().zip(pps.iter()) {
+                    let mut next = Vec::new();
+                    for b in &cur {
+                        next.extend(match_expr(pt, pp, b));
+                    }
+                    cur = next;
+                    if cur.is_empty() {
+                        return;
+                    }
                 }
-                cur = next;
-                if cur.is_empty() {
-                    return vec![];
-                }
-            }
-            cur
+                out.extend(cur);
+            });
+            out
         }
         _ => vec![],
     }
@@ -409,12 +472,12 @@ pub fn instantiate(pat: &PClaim, bind: &Bindings) -> Claim {
         }
         PClaim::PredVal(name, args, value) => {
             let args: Vec<String> = args.iter().map(|a| render_expr(a, bind)).collect();
-            Claim::PredVal { name: name.clone(), args, value: value.clone() }
+            Claim::pred(name, &args, value.clone())
         }
         PClaim::PredAt(name, args, pe) => {
             let args: Vec<String> = args.iter().map(|a| render_expr(a, bind)).collect();
             let p = render_expr(pe, bind);
-            Claim::PredVal { name: name.clone(), args, value: Value::Point(p) }
+            Claim::pred(name, &args, Value::Point(p))
         }
         PClaim::On(p, s) => {
             Claim::On(render_expr(p, bind), Claim::norm_seg(&render_expr(s, bind)))
@@ -533,6 +596,40 @@ pub fn find_hint(
 pub fn rule_base() -> Vec<Rule> {
     crate::rule_loader::load_rules_from_dir(std::path::Path::new("rules")).unwrap_or_default()
 }
-pub fn derive_all(_chain: &[Claim], _hints: &[&str]) -> Vec<Claim> {
-    vec![]
+pub fn derive_all(chain: &[Claim], _hints: &[&str]) -> Vec<Claim> {
+    let rules = rule_base();
+    let mut out = Vec::new();
+    for rule in &rules {
+        let mut cur: Vec<Bindings> = vec![Bindings::new()];
+        for ant in &rule.antecedents {
+            let mut next = Vec::new();
+            for bind in &cur {
+                for fact in chain {
+                    next.extend(match_pat(fact, ant, bind));
+                }
+            }
+            cur = next;
+            if cur.is_empty() {
+                break;
+            }
+        }
+        for bind in cur {
+            let mut ok = true;
+            for req in &rule.requires {
+                let inst = instantiate(req, &bind);
+                if inst.has_unbound() || !chain.contains(&inst) {
+                    ok = false;
+                    break;
+                }
+            }
+            if !ok {
+                continue;
+            }
+            let c = instantiate(&rule.consequent, &bind);
+            if !c.has_unbound() && !chain.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    out
 }

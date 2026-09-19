@@ -6,3 +6,8 @@ antecedents:
 requires:
 consequent:
   - On(G, Seg2(C,F))
+chain:
+  IsCentroid(G, Angle(A,B,C)) &&
+  IsMedian(F, Seg2(A,B))
+  ->
+  On(G, Seg2(C,F))
