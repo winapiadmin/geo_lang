@@ -299,6 +299,13 @@ fn parse_predicate_with_value(left: &str, right: &str, section: &str, path: &Pat
         }
         return Ok(PClaim::PredAt("intersection".into(), args, parse_pexpr(right)?));
     }
+    if name_lower == "rightat" {
+        if args.len() != 1 {
+            return Err(format!("{}: {section}: RightAt needs 1 arg", path.display()));
+        }
+        let point = parse_pexpr(right)?;
+        return Ok(PClaim::PredAt("rightat".into(), args, point));
+    }
 
     let value = parse_value(right)?;
     if name_lower == "iscollinear" {
@@ -358,12 +365,6 @@ fn parse_predicate_with_value(left: &str, right: &str, section: &str, path: &Pat
         Ok(PClaim::PredVal("isaltitude".into(), args, value))
     } else if name_lower == "onsamecircle" {
         Ok(PClaim::OnSameCircle(args))
-    } else if name_lower == "rightat" {
-        if args.len() != 1 {
-            return Err(format!("{}: {section}: RightAt needs 1 arg", path.display()));
-        }
-        let point = parse_pexpr(right)?;
-        Ok(PClaim::PredAt("rightat".into(), args, point))
     } else if name_lower == "ratioeq" {
         if args.len() != 2 {
             return Err(format!("{}: {section}: RatioEq needs 2 args", path.display()));

@@ -22,8 +22,7 @@
   then prints a derivation chain.
 
   The language is case-insensitive and whitespace/indentation-insensitive:
-      Prependicular == perpendicularline == PERPENDICULARLINE
-  (`Prependicular` is accepted as a mis-spelling of `Perpendicular`.)
+      Perpendicular == perpendicularline == PERPENDICULARLINE
 
   Statements may span multiple lines while parentheses are open:
 

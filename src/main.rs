@@ -196,7 +196,7 @@ fn run_prove(path: &str, goal_arg: Option<&str>, disabled: &[String], dump_depth
     } else {
         let mut last_proof_idx: Option<u32> = None;
         for goal in &file.goals {
-            // Apply this goal's scoped inputs (`inp[N]:` sections).
+                        // Apply this goal's scoped inputs (`inp[N]:` sections).
             let mut scoped_stmts: Vec<&geo_lang::ast::InputStmt> = Vec::new();
             for (idx, stmt) in &file.scoped_input {
                 if *idx == goal.index {
@@ -422,13 +422,102 @@ fn run_prove(path: &str, goal_arg: Option<&str>, disabled: &[String], dump_depth
                                     .collect();
                                 println!("{}", parts.join("="));
                                 continue;
+}
+                    }
+                }
+                // Symbolic trig evaluation for EqChain (like sum_solves_trig but for EqChain).
+                let display = checker::render_expr(claim);
+                if let Some((tri, apex)) = symbolic::eq_chain_solves_trig(items, &goal_facts) {
+                    println!("// {}", display);
+                    let steps = symbolic::eq_chain_trig_steps(items, &tri, apex);
+                    for s in &steps {
+                        println!("{}", s);
+                    }
+                    let parts: Vec<String> = items
+                        .iter()
+                        .map(|e| checker::render_len_expr(e))
+                        .collect();
+                    println!("{}", parts.join("="));
+                    continue;
+                }
+                }
+                // Try to convert product equality to RatioEq and prove: a*b = c*d -> a/c = d/b
+                if let ast::ClaimExpr::EqChain { items, .. } = claim {
+                    if items.len() == 2 {
+                        let try_prove_as_ratio = |lhs: &ast::LenExpr, rhs: &ast::LenExpr| -> bool {
+                            let (seg_a, seg_b, seg_c, seg_d) = match (lhs, rhs) {
+                                (ast::LenExpr::Mul(l1, r1), ast::LenExpr::Mul(l2, r2)) => {
+                                    let a = match l1.as_ref() { ast::LenExpr::Seg(s) => s.clone(), _ => return false };
+                                    let b = match r1.as_ref() { ast::LenExpr::Seg(s) => s.clone(), _ => return false };
+                                    let c = match l2.as_ref() { ast::LenExpr::Seg(s) => s.clone(), _ => return false };
+                                    let d = match r2.as_ref() { ast::LenExpr::Seg(s) => s.clone(), _ => return false };
+                                    (a, b, c, d)
+                                }
+                                _ => return false,
+                            };
+                            // a*b = c*d  <=>  a/c = d/b  <=>  a/b = c/d (various forms)
+                            // Try a/c = d/b
+                            let ratio_claim = geo_lang::claim::Claim::ratio_eq(
+                                &geo_lang::claim::RatioExpr::Quot {
+                                    num: geo_lang::claim::RatioAtom::Seg(seg_a.clone()),
+                                    den: geo_lang::claim::RatioAtom::Seg(seg_c.clone()),
+                                },
+                                &geo_lang::claim::RatioExpr::Quot {
+                                    num: geo_lang::claim::RatioAtom::Seg(seg_d.clone()),
+                                    den: geo_lang::claim::RatioAtom::Seg(seg_b.clone()),
+                                },
+                            );
+                            if let Some(rp) = prover::prove_seeded(&ratio_claim, &goal_facts, &saturated, &rules, disabled_opt) {
+                                let display = checker::render_expr(claim);
+                                println!("// {}", display);
+                                let tree = prover::render_tree(&rp, 0, None);
+                                for line in tree.lines() {
+                                    println!("// {}", line);
+                                }
+                                let chain = prover::render_chain(&rp, None);
+                                println!("{}", chain);
+                                println!("{}", display);
+                                return true;
                             }
+                            // Try a/b = c/d
+                            let ratio_claim2 = geo_lang::claim::Claim::ratio_eq(
+                                &geo_lang::claim::RatioExpr::Quot {
+                                    num: geo_lang::claim::RatioAtom::Seg(seg_a.clone()),
+                                    den: geo_lang::claim::RatioAtom::Seg(seg_b.clone()),
+                                },
+                                &geo_lang::claim::RatioExpr::Quot {
+                                    num: geo_lang::claim::RatioAtom::Seg(seg_c.clone()),
+                                    den: geo_lang::claim::RatioAtom::Seg(seg_d.clone()),
+                                },
+                            );
+                            if let Some(rp) = prover::prove_seeded(&ratio_claim2, &goal_facts, &saturated, &rules, disabled_opt) {
+                                let display = checker::render_expr(claim);
+                                println!("// {}", display);
+                                let tree = prover::render_tree(&rp, 0, None);
+                                for line in tree.lines() {
+                                    println!("// {}", line);
+                                }
+                                let chain = prover::render_chain(&rp, None);
+                                println!("{}", chain);
+                                println!("{}", display);
+                                return true;
+                            }
+                            false
+                        };
+                        if try_prove_as_ratio(&items[0], &items[1]) || try_prove_as_ratio(&items[1], &items[0]) {
+                            continue;
                         }
                     }
                 }
                 let atoms = checker::claim_atoms(claim);
                 if atoms.is_empty() {
-                    println!("// invalid claim");
+                    // EqChain with arithmetic that we can't decompose - not invalid, just not provable yet.
+                    if let ast::ClaimExpr::EqChain { .. } = claim {
+                        println!("// {}  (cannot be proven)", checker::render_expr(claim));
+                        println!("Nothing");
+                    } else {
+                        println!("// invalid claim");
+                    }
                     continue;
                 }
                 let displays = checker::atom_display_strings(claim);

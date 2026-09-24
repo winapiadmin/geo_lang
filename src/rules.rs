@@ -278,6 +278,29 @@ pub fn match_pat(claim: &Claim, pat: &PClaim, bind: &Bindings) -> Vec<Bindings> 
                 }
                 out.extend(cur);
             }
+            // `iscollinear`'s claim args are stored alphabetically sorted
+            // (see `Claim::pred`), so the argument at a given position may
+            // not correspond to the same pattern variable at that position
+            // — e.g. `IsCollinear(Q,J,H)` is actually stored as `(H,J,Q)`.
+            // Try every permutation of the 3 args against the pattern's 3
+            // slots so a rule written positionally (like the fallback chain
+            // in `on-segment-implies-collinear` / `nine-point-mid-collinear`)
+            // still matches the sorted fact.
+            if args.len() == 3 && name == "iscollinear" {
+                const PERMS: [[usize; 3]; 5] =
+                    [[0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+                for perm in PERMS.iter() {
+                    let mut cur = vec![bind.clone()];
+                    for i in 0..3 {
+                        let mut next = Vec::new();
+                        for b in &cur {
+                            next.extend(match_expr(&args[perm[i]], &pargs[i], b));
+                        }
+                        cur = next;
+                    }
+                    out.extend(cur);
+                }
+            }
             out
         }
         (
@@ -404,7 +427,10 @@ fn match_ratio(claim: &RatioExpr, pat: &PRatioExpr, bind: &Bindings) -> Vec<Bind
 /// Render a pattern expression into a reference string using the bindings.
 pub fn render_expr(e: &PExpr, bind: &Bindings) -> String {
     match e {
-        PExpr::PtVar(v) | PExpr::AnyRef(v) => bind.get(v).cloned().unwrap_or_default(),
+        PExpr::PtVar(v) => bind.get(v).cloned().unwrap_or_default(),
+        // An unbound AnyRef is a literal (e.g. `sin(ABC)` in a ratio
+        // consequent): keep the pattern text so instantiate does not drop it.
+        PExpr::AnyRef(v) => bind.get(v).cloned().unwrap_or_else(|| v.clone()),
         PExpr::Seg2(a, b) => {
             let x = bind.get(a).cloned().unwrap_or_default();
             let y = bind.get(b).cloned().unwrap_or_default();
@@ -594,7 +620,11 @@ pub fn find_hint(
 
 /// Load geometry rules from .geo files in the rules/ directory.
 pub fn rule_base() -> Vec<Rule> {
-    crate::rule_loader::load_rules_from_dir(std::path::Path::new("rules")).unwrap_or_default()
+    let path = std::path::Path::new("rules");
+        crate::rule_loader::load_rules_from_dir(path).unwrap_or_else(|e| {
+        eprintln!("// Error loading rules: {}", e);
+        Vec::new()
+    })
 }
 pub fn derive_all(chain: &[Claim], _hints: &[&str]) -> Vec<Claim> {
     let rules = rule_base();

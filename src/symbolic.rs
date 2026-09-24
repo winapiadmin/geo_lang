@@ -968,6 +968,30 @@ pub fn ratio_derivation_proof(seg: &str, facts: &FactStore) -> Option<Proof> {
     None
 }
 
+/// True only if `goal` is a `RatioEq` that can be *positively disproven*:
+/// both sides resolve to a concrete numeric value (via given lengths or
+/// midpoint coordinates) and those values disagree. This is the safety net
+/// for forward saturation: it catches genuinely spurious equalities that
+/// structural rule-matching alone can produce (e.g. mismatched transitivity
+/// chains), without rejecting a sound symbolic derivation just because the
+/// problem has no numeric lengths to check it against. When neither side can
+/// be resolved numerically at all, there is nothing to contradict, so this
+/// returns `false` (no conflict) and the structurally-derived fact is kept.
+pub fn ratio_conflicts(goal: &Claim, facts: &FactStore) -> bool {
+    if let Claim::RatioEq(l, r) = goal {
+        let env = compute(facts);
+        if let (Some(a), Some(b)) = (resolve_ratio(l, &env), resolve_ratio(r, &env)) {
+            return a != b;
+        }
+        if let (Some(a), Some(b)) = (resolve_ratio_coords(l, facts), resolve_ratio_coords(r, facts)) {
+            return a != b;
+        }
+        false
+    } else {
+        false
+    }
+}
+
 /// True if the ratio equality holds numerically, e.g. `AD/DB = AE/EC` when
 /// `3/2 = 6/4`.
 pub fn ratio_solves(goal: &Claim, facts: &FactStore) -> bool {
@@ -1777,6 +1801,225 @@ pub fn sum_trig_chain(
         format!("({}\u{b2}+{}\u{b2})/{}", l1_disp, l2_disp, hyp_disp),
         hyp_disp
     ))
+}
+
+/// Symbolic right-triangle trig evaluation for EqChain goals: parameterizes
+/// a declared right-triangle's legs at a generic position (x=3, y=4 -> hyp=5),
+/// resolves every length and trig factor structurally, and checks equality.
+///
+/// Returns the `(triangle, apex)` pair that actually made the identity hold
+/// numerically, not just whether *some* right-triangle in the store works —
+/// the store often has several `RightAt` facts (e.g. both the original
+/// right triangle and an altitude-created sub-triangle), and the caller
+/// needs to render proof steps for the *same* candidate that was verified,
+/// not an arbitrary/first one.
+pub fn eq_chain_solves_trig(
+    items: &[crate::ast::LenExpr],
+    facts: &FactStore,
+) -> Option<(String, char)> {
+    let mut targets: Vec<(String, char)> = Vec::new();
+    for c in facts.all() {
+        if let Claim::PredVal { name, args, value } = c {
+            if name == "rightat" && args.len() == 1 {
+                if let Value::Point(p) = value {
+                    targets.push((args[0].clone(), p.chars().next().unwrap_or('\0')));
+                }
+            }
+        }
+    }
+
+    for (tri, apex) in &targets {
+        let chars: Vec<char> = tri.chars().collect();
+        let apex_lower = apex.to_lowercase().next().unwrap_or(*apex);
+        if chars.len() != 3 || !chars.contains(&apex_lower) {
+            continue;
+        }
+        let others: Vec<char> = chars.iter().copied().filter(|&c| c != apex_lower).collect();
+        if others.len() != 2 {
+            continue;
+        }
+
+        let x = 3.0f64;
+        let y = 4.0f64;
+        let z = (x * x + y * y).sqrt();
+
+        fn resolve_len(apex_lower: char, others: &[char], x: f64, y: f64, z: f64, a: char, b: char) -> Option<f64> {
+            let pair = |p: char, q: char| (p == a && q == b) || (p == b && q == a);
+            if pair(apex_lower, others[0]) {
+                Some(x)
+            } else if pair(apex_lower, others[1]) {
+                Some(y)
+            } else if pair(others[0], others[1]) {
+                Some(z)
+            } else {
+                None
+            }
+        }
+
+        fn resolve_trig(apex_lower: char, others: &[char], x: f64, y: f64, z: f64, func: &str, v: char) -> Option<f64> {
+            let v_lower = v.to_ascii_lowercase();
+            if v_lower == apex_lower {
+                match func {
+                    "sin" => Some(1.0),
+                    "cos" => Some(0.0),
+                    "tan" => None,
+                    _ => None,
+                }
+            } else if v_lower == others[0] {
+                match func {
+                    "sin" => Some(y / z),
+                    "cos" => Some(x / z),
+                    "tan" => Some(y / x),
+                    _ => None,
+                }
+            } else if v_lower == others[1] {
+                match func {
+                    "sin" => Some(x / z),
+                    "cos" => Some(y / z),
+                    "tan" => Some(x / y),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+
+        fn eval_expr(
+            apex_lower: char,
+            others: &[char],
+            x: f64,
+            y: f64,
+            z: f64,
+            e: &crate::ast::LenExpr,
+        ) -> Option<f64> {
+            match e {
+                crate::ast::LenExpr::Num(n) => Some(*n),
+                crate::ast::LenExpr::Seg(s) => {
+                    if s.chars().count() == 2 {
+                        let a = s.chars().next()?;
+                        let b = s.chars().nth(1)?;
+                        resolve_len(apex_lower, others, x, y, z, a, b)
+                    } else {
+                        None
+                    }
+                }
+                crate::ast::LenExpr::Distance(a, b) => {
+                    let ca = a.chars().next()?;
+                    let cb = b.chars().next()?;
+                    resolve_len(apex_lower, others, x, y, z, ca, cb)
+                }
+                crate::ast::LenExpr::Sq(inner) => {
+                    eval_expr(apex_lower, others, x, y, z, inner).map(|v| v * v)
+                }
+                crate::ast::LenExpr::Sqrt(inner) => {
+                    eval_expr(apex_lower, others, x, y, z, inner).map(|v| v.sqrt())
+                }
+                crate::ast::LenExpr::Add(l, r) => {
+                    Some(eval_expr(apex_lower, others, x, y, z, l)? + eval_expr(apex_lower, others, x, y, z, r)?)
+                }
+                crate::ast::LenExpr::Sub(l, r) => {
+                    Some(eval_expr(apex_lower, others, x, y, z, l)? - eval_expr(apex_lower, others, x, y, z, r)?)
+                }
+                crate::ast::LenExpr::Mul(l, r) => {
+                    Some(eval_expr(apex_lower, others, x, y, z, l)? * eval_expr(apex_lower, others, x, y, z, r)?)
+                }
+                crate::ast::LenExpr::Div(l, r) => {
+                    let d = eval_expr(apex_lower, others, x, y, z, r)?;
+                    if d == 0.0 { None } else { Some(eval_expr(apex_lower, others, x, y, z, l)? / d) }
+                }
+                crate::ast::LenExpr::Trig(func, angle) => {
+                    let v = angle.chars().next()?;
+                    resolve_trig(apex_lower, others, x, y, z, func, v)
+                }
+            }
+        }
+
+        let vals: Vec<f64> = items.iter().filter_map(|e| eval_expr(apex_lower, &others, x, y, z, e)).collect();
+        if vals.len() == items.len() && vals.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) {
+            return Some((tri.clone(), *apex));
+        }
+    }
+    None
+}
+
+/// Render proof steps for an EqChain goal verified by `eq_chain_solves_trig`.
+pub fn eq_chain_trig_steps(
+    items: &[crate::ast::LenExpr],
+    tri: &str,
+    apex: char,
+) -> Vec<String> {
+    let chars: Vec<char> = tri.chars().collect();
+    let apex_lower = apex.to_lowercase().next().unwrap_or(apex);
+    if chars.len() != 3 || !chars.contains(&apex_lower) {
+        return vec![];
+    }
+    let others: Vec<char> = chars.iter().copied().filter(|&c| c != apex_lower).collect();
+    if others.len() != 2 {
+        return vec![];
+    }
+    let hyp_disp = format!("{}{}", others[0].to_uppercase(), others[1].to_uppercase());
+    let apex_u = apex.to_uppercase();
+
+    let mut lines = Vec::new();
+
+    // Substitute trig functions.
+    for item in items {
+        match item {
+            crate::ast::LenExpr::Mul(l, r) | crate::ast::LenExpr::Div(l, r) => {
+                let (len_expr, trig_expr) = if matches!(l.as_ref(), crate::ast::LenExpr::Trig(_, _)) {
+                    (r.as_ref(), l.as_ref())
+                } else if matches!(r.as_ref(), crate::ast::LenExpr::Trig(_, _)) {
+                    (l.as_ref(), r.as_ref())
+                } else {
+                    continue;
+                };
+                if let crate::ast::LenExpr::Trig(func, angle) = trig_expr {
+                    if let Some(vch) = angle.chars().next() {
+                        if vch != apex_lower {
+                            let vch_lower = vch.to_ascii_lowercase();
+                            // The leg between the apex and the matched vertex
+                            // is *adjacent* to the angle at that vertex; the
+                            // leg to the *other* non-apex point is the one
+                            // *opposite* it. sin uses opposite/hyp, cos uses
+                            // adjacent/hyp, tan uses opposite/adjacent — they
+                            // are not interchangeable, and matches what
+                            // `resolve_trig` actually verifies numerically.
+                            let opposite_pt = others.iter().copied().find(|&c| c != vch_lower);
+                            let adjacent_disp = format!("{}{}", apex_u, vch.to_uppercase());
+                            let len_disp = render_len_expr(len_expr);
+                            let trig_val = match (func.as_str(), opposite_pt) {
+                                ("sin", Some(opp)) => {
+                                    let opposite_disp = format!("{}{}", apex_u, opp.to_uppercase());
+                                    format!("{}/{}", opposite_disp, hyp_disp)
+                                }
+                                ("cos", _) => format!("{}/{}", adjacent_disp, hyp_disp),
+                                ("tan", Some(opp)) => {
+                                    let opposite_disp = format!("{}{}", apex_u, opp.to_uppercase());
+                                    format!("{}/{}", opposite_disp, adjacent_disp)
+                                }
+                                _ => continue,
+                            };
+                            lines.push(format!(
+                                "{}*{}({})={}*{}",
+                                len_disp, func, angle.to_uppercase(), len_disp, trig_val
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Pythagorean closure.
+    let l1_disp = format!("{}{}", apex_u, others[0].to_uppercase());
+    let l2_disp = format!("{}{}", apex_u, others[1].to_uppercase());
+    lines.push(format!(
+        "{}^2+{}^2={}^2  // Pythagoras",
+        l1_disp, l2_disp, hyp_disp
+    ));
+
+    lines
 }
 
 /// Multi-step symbolic derivation in .geo syntax for a Sum goal verified

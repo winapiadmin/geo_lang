@@ -371,7 +371,12 @@ impl Claim {
                 let mut pts: Vec<String> = args.iter().map(|a| Self::norm_ref(a)).collect();
                 pts.sort();
                 return Claim::OnSameCircle(pts);
-            }
+            },
+"iscollinear" => {
+    let mut pts: Vec<String> = args.iter().map(|a| Self::norm_ref(a)).collect();
+    pts.sort();
+    pts
+}
             _ => args.iter().map(|a| Self::norm_ref(a)).collect(),
         };
         let value = match value {

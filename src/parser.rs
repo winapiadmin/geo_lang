@@ -1049,6 +1049,12 @@ impl Parser {
             msg: "expected a claim".into(),
         })?;
         let pos = pos_of(t);
+        if matches!(t.kind, TokKind::Number(_)) {
+            let lhs = self.parse_ratio_expr(toks, k)?;
+            expect_symbol(toks, k, '=')?;
+            let rhs = self.parse_ratio_expr(toks, k)?;
+            return Ok(ClaimExpr::RatioEq { lhs, rhs, pos });
+        }
         let name = match &t.kind {
             TokKind::Ident(id) => id.to_lowercase(),
             _ => return self.err(pos, "expected an identifier"),
@@ -1084,8 +1090,6 @@ impl Parser {
                     .unwrap_or(toks.len() - scan_start);
             let rest_is_trig = toks[scan_start..arrow_pos].windows(2).any(|w| {
                 matches!(&w[0].kind, TokKind::Ident(id) if id.eq_ignore_ascii_case("cos"))
-                    || is_symbol(&w[0], '*')
-                    || is_symbol(&w[1], '*')
             });
             if rest_is_trig {
                 if prefix_cos_eq {
@@ -1224,16 +1228,32 @@ impl Parser {
                 return Ok(ClaimExpr::AngleEq { lhs, rhs, pos });
             }
             if *k < toks.len() && is_symbol(&toks[*k], '=') {
-                *k += 1;
-                let value = parse_value_at(toks, k)?;
-                return Ok(ClaimExpr::PredEq {
-                    name,
-                    args,
-                    value,
-                    pos,
+                // A name with no args followed by '=' could be a segment
+                // equality like BH=AB*sin(ACB) or A1B2=CD+EF. Fall through
+                // to the EqChain path when the RHS is not a simple value
+                // (bool keyword or number); otherwise parse as PredEq.
+                let no_args = args.is_empty();
+                let rhs_is_simple = toks.get(*k + 1).map_or(false, |t| {
+                    matches!(t.kind, TokKind::Number(_))
+                        || matches!(&t.kind, TokKind::Ident(w) if matches!(w.to_lowercase().as_str(), "true" | "false" | "none" | "null" | "any"))
                 });
+                if !no_args || rhs_is_simple {
+                    *k += 1;
+                    let value = parse_value_at(toks, k)?;
+                    return Ok(ClaimExpr::PredEq {
+                        name,
+                        args,
+                        value,
+                        pos,
+                    });
+                }
+                // Fall through to EqChain path for segment=length_expr.
+            } else if args.is_empty() {
+                // No parens, no '=' — could be a bare segment reference
+                // like BH or A1B2. Fall through to EqChain path.
+            } else {
+                return Ok(ClaimExpr::PredCall { name, args, pos });
             }
-            return Ok(ClaimExpr::PredCall { name, args, pos });
         }
 
         // chained length equality: lhs = rhs = ...

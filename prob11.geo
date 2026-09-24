@@ -1,136 +1,158 @@
 /*
+# Complicated geometry problem — isosceles triangle, altitude,
+# midsegments, angle bisector, Pythagoras, and circle
 
-# Complicated geometry problem — rectangle, circle, midpoints
+ABC is isosceles with AB = AC.
 
-ABCD is a rectangle with AB=6 and BC=8.
-
+D is the foot of the perpendicular from A to BC.
 M is the midpoint of AB.
-N is the midpoint of BC.
-E is the foot of the B-angle-bisector on AC.
+N is the midpoint of AC.
+E is the foot of the A-angle-bisector on BC.
 
-K is the circle centered at B with radius BA.
+K is the circle centered at A with radius AB.
 P is an arbitrary point on K.
 
-Prove:
-1. AB is parallel to CD.
-2. BC is perpendicular to AB.
-3. AM = MB.
-4. BN = NC.
-5. MN is parallel to AC.
-6. MN/AC = 1/2.
-7. AE/EC = AB/BC.
-8. AE/EC = 3/4.
-9. AC^2 = 100.
-10. AE = 30/7.
-11. EC = 40/7.
-12. BP = 6.
-13. BP^2 = 36.
+Given:
+AD = 7
+BD = 6
 
-The problem deliberately combines independent rule families:
-rectangle facts
-midpoint and midsegment facts
-angle-bisector ratio
-Pythagoras
-circle/radius semantics
-numeric ratio and segment arithmetic
+Prove:
+1. IsIsosceles(ABC)=true
+2. IsPerpendicular(AD,BC)=true
+3. IsMedian(D,BC)=true
+4. BD=DC
+5. BC=12
+6. Distance(A,B)^2=85
+7. Distance(A,C)^2=85
+8. AB=AC
+9. IsParallel(MN,BC)=true
+10. MN/BC=1/2
+11. MN=6
+12. IsAngleBisector(AE,BAC)=true
+13. BE/EC=AB/AC
+14. BE/EC=1
+15. BE=EC
+16. BE=6
+17. EC=6
+18. Distance(A,P)=Distance(A,B)
+19. Distance(A,P)^2=85
 */
 
 inp:
 
-Triangle(A,B,C)
+Triangle(A,B,C,[isoscelesAt=A])
 
-Triangle(B,C,D)
-
-Segment(A,B)
-Segment(B,C)
-Segment(C,D)
-Segment(D,A)
-Segment(A,C)
-
-IsRectangle(A,B,C,D)=true
-
-AB=6
-BC=8
+D=Intersection(
+    PerpendicularLine(A,BC),
+    BC
+)
 
 M=Midpoint(AB)
-N=Midpoint(BC)
+N=Midpoint(AC)
 
-E=AngleBisector(B,AC)
+E=AngleBisector(A,BC)
 
-K=Circle(B,BA)
+K=Circle(A,AB)
 
 P=PointOn(K)
 
+Distance(A,D)=7
+Distance(B,D)=6
+
 prove:
 
-1. IsParallel(AB,CD)=true
+1. IsIsosceles(ABC)=true
 
-2. IsPerpendicular(AB,BC)=true
+2. IsPerpendicular(AD,BC)=true
 
-3. Distance(A,M)=Distance(M,B)
+3. IsMedian(D,BC)=true
 
-4. Distance(B,N)=Distance(N,C)
+4. BD=DC
 
-5. IsParallel(MN,AC)=true
+5. BC=12
 
-6. MN/AC=1/2
+6. Distance(A,B)^2=85
 
-7. AE/EC=AB/BC
+7. Distance(A,C)^2=85
 
-8. AE/EC=3/4
+8. AB=AC
 
-9. AC^2=100
+9. IsParallel(MN,BC)=true
 
-10. AE=30/7
+10. MN/BC=1/2
 
-11. EC=40/7
+11. MN=6
 
-12. Distance(B,P)=6
+12. IsAngleBisector(AE,BAC)=true
 
-13. Distance(B,P)^2=36
+13. BE/EC=AB/AC
+
+14. BE/EC=1
+
+15. BE=EC
+
+16. BE=6
+
+17. EC=6
+
+18. Distance(A,P)=Distance(A,B)
+
+19. Distance(A,P)^2=85
 
 proof[1]:
-IsRectangle(A,B,C,D)=true -> IsParallel(AB,CD)=true
+IsIsosceles(ABC)=true
 
 proof[2]:
-IsRectangle(A,B,C,D)=true -> IsPerpendicular(AB,BC)=true
+Nothing
+//Intersection(PerpendicularLine(A,BC),BC)=D -> IsPerpendicular(AD,BC)=true
 
 proof[3]:
-IsMedian(M,AB)=true -> AM=MB
+(IsIsosceles(ABC)=true && IsPerpendicular(AD,BC)=true) -> IsMedian(D,BC)=true
 
 proof[4]:
-IsMedian(N,BC)=true -> BN=NC
+IsMedian(D,BC)=true -> BD=DC
 
 proof[5]:
-// M and N are midpoints of two sides of triangle ABC.
-IsMedian(M,AB)=true && IsMedian(N,BC)=true -> IsParallel(MN,AC)=true
+BD=DC -> BC=12
 
 proof[6]:
-// Midsegment theorem.
-IsParallel(MN,AC)=true -> MN/AC=1/2
+(IsPerpendicular(AD,BC)=true && AD=7 && BD=6) -> Distance(A,B)^2=85
 
 proof[7]:
-// E is the foot of the B-angle-bisector on AC.
-IsAngleBisector(BE,ABC)=true -> AE/EC=AB/BC
+(IsIsosceles(ABC)=true && Distance(A,B)^2=85) -> Distance(A,C)^2=85
 
 proof[8]:
-AB=6 && BC=8 -> AB/BC=3/4 -> AE/EC=3/4
+IsIsosceles(ABC)=true -> AB=AC
 
 proof[9]:
-// ABC is right at B.
-IsPerpendicular(AB,BC)=true && AB=6 && BC=8 -> AC^2=100
+(Midpoint(M,AB)=true && Midpoint(N,AC)=true) -> IsParallel(MN,BC)=true
 
 proof[10]:
-// AE+EC=AC together with AE/EC=3/4.
-AE/EC=3/4 && AC=10 -> AE=30/7
+IsParallel(MN,BC)=true -> MN/BC=1/2
 
 proof[11]:
-AE/EC=3/4 && AC=10 -> EC=40/7
+MN/BC=1/2 -> MN=6
 
 proof[12]:
-// P lies on the circle centered at B with radius BA=6.
-OnCircle(P,K)=true && AB=6 -> BP=6
+IsAngleBisector(AE,BC) -> IsAngleBisector(AE,BAC)=true
 
 proof[13]:
-BP=6 -> BP^2=36
+IsAngleBisector(AE,BAC)=true -> BE/EC=AB/AC
 
+proof[14]:
+AB=AC -> BE/EC=1
+
+proof[15]:
+BE/EC=1 -> BE=EC
+
+proof[16]:
+BE=EC -> BE=6
+
+proof[17]:
+BE=EC -> EC=6
+
+proof[18]:
+OnCircle(P,K)=true -> Distance(A,P)=Distance(A,B)
+
+proof[19]:
+Distance(A,P)=Distance(A,B) -> Distance(A,P)^2=85
