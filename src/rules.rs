@@ -54,6 +54,7 @@ pub enum PClaim {
     AngleEq(PExpr, PExpr),
     /// Equality of two ratios, e.g. `BD/DC = AB/AC`.
     RatioEq(PRatioExpr, PRatioExpr),
+    RadiusEq(PExpr, PExpr),
     PredVal(String, Vec<PExpr>, Value),
     /// A predicate whose value is a point pattern, e.g. `rightAt(T) = X`.
     PredAt(String, Vec<PExpr>, PExpr),
@@ -350,6 +351,13 @@ pub fn match_pat(claim: &Claim, pat: &PClaim, bind: &Bindings) -> Vec<Bindings> 
             }
             out
         }
+        (Claim::RadiusEq(c, s), PClaim::RadiusEq(pc, ps)) => {
+            let mut out = Vec::new();
+            for b1 in match_expr(c, pc, bind) {
+                out.extend(match_expr(s, ps, &b1));
+            }
+            out
+        }
         (Claim::On(p, s), PClaim::On(pp, ps)) => {
             let mut out = Vec::new();
             for b1 in match_expr(p, pp, bind) {
@@ -503,10 +511,13 @@ pub fn instantiate(pat: &PClaim, bind: &Bindings) -> Claim {
         PClaim::PredAt(name, args, pe) => {
             let args: Vec<String> = args.iter().map(|a| render_expr(a, bind)).collect();
             let p = render_expr(pe, bind);
-            Claim::pred(name, &args, Value::Point(p))
+            Claim::PredVal { name: name.to_string(), args, value: Value::Point(p) }
         }
         PClaim::On(p, s) => {
             Claim::On(render_expr(p, bind), Claim::norm_seg(&render_expr(s, bind)))
+        }
+        PClaim::RadiusEq(c, s) => {
+            Claim::RadiusEq(render_expr(c, bind), Claim::norm_seg(&render_expr(s, bind)))
         }
         PClaim::IsoscelesAt(t, a) => {
             Claim::IsoscelesAt(render_expr(t, bind), render_expr(a, bind))

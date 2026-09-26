@@ -342,7 +342,136 @@ pub fn build_facts_from_input(file: &File) -> FactStore {
         process_input(stmt, &mut facts, &mut diags, &known, &circles);
     }
     derive_global_facts(&mut facts);
+    // spam_internal_points(&mut facts);
     facts
+}
+
+/// Create internal midpoint and intersection points to expand the set of
+/// marked points.  For every segment between two known points, a synthetic
+/// midpoint is added (unless one already exists).  For every pair of
+/// non-collinear segments whose lines cross inside both segments, a synthetic
+/// intersection point is added.
+///
+/// NOTE: This only adds On/OnSegment facts (marking points on segments).
+/// It does NOT add IsMedian or SegEq facts so as not to pollute the numeric
+/// environment used by the prover.
+#[allow(dead_code)]
+fn spam_internal_points(facts: &mut FactStore) {
+    use std::collections::HashSet;
+
+    // --- 1. Midpoints for all segments ---
+    let mut segments: Vec<(String, String, String)> = Vec::new(); // (norm_seg, a, b)
+    let mut segment_set: HashSet<String> = HashSet::new();
+    for c in facts.all() {
+        match c {
+            Claim::On(_, ref s) | Claim::OnSegment(_, ref s) => {
+                let sn = Claim::norm_seg(s);
+                if let Some((a, b)) = split_seg(&sn) {
+                    if !segment_set.contains(&sn) {
+                        segment_set.insert(sn.clone());
+                        segments.push((sn, a, b));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Check which segments already have midpoints.
+    let mut next_mid: u32 = 0;
+    for c in facts.all() {
+        if let Claim::On(ref p, _) | Claim::OnSegment(ref p, _) = c {
+            let pn = Claim::norm_ref(p);
+            if pn.starts_with("T_") {
+                if let Ok(n) = pn[2..].parse::<u32>() {
+                    next_mid = next_mid.max(n + 1);
+                }
+            }
+        }
+    }
+
+    for (sn, a, b) in &segments {
+        if a == b {
+            continue;
+        }
+        // Check if some point is already a midpoint of this segment.
+        let has_mid = facts.all().iter().any(|c| {
+            matches!(c, Claim::PredVal { name, args, value }
+                if name == "ismedian" && *value == Value::Bool(true) && args.len() == 2
+                    && Claim::norm_seg(&args[1]) == *sn)
+        });
+        if has_mid {
+            continue;
+        }
+        let mid_name = format!("T_{}", next_mid);
+        next_mid += 1;
+        let seg_n = Claim::norm_seg(sn);
+        facts.add(Claim::On(mid_name.clone(), seg_n.clone()), Origin::Input);
+        facts.add(Claim::OnSegment(mid_name.clone(), seg_n), Origin::Input);
+    }
+
+    // --- 2. Intersection points for crossing segment pairs ---
+    // If a single-char point P is interior to (lies on) two different segments,
+    // it is their intersection point.
+    let mut next_int: u32 = next_mid;
+    let mut seen_intersections: HashSet<(String, String, String)> = HashSet::new();
+    for c in facts.all() {
+        match c {
+            Claim::On(ref p, ref s1) => {
+                let pn = Claim::norm_ref(p);
+                if pn.len() != 1 {
+                    continue;
+                }
+                let s1n = Claim::norm_seg(s1);
+                if let Some((a1, b1)) = split_seg(&s1n) {
+                    if pn == a1 || pn == b1 {
+                        continue; // endpoint, not an interior point
+                    }
+                    for c2 in facts.all() {
+                        if let Claim::On(ref p2, ref s2) = c2 {
+                            if Claim::norm_ref(p2) != pn {
+                                continue;
+                            }
+                            let s2n = Claim::norm_seg(s2);
+                            if s2n == s1n {
+                                continue;
+                            }
+                            if let Some((a2, b2)) = split_seg(&s2n) {
+                                if pn == a2 || pn == b2 {
+                                    continue;
+                                }
+                                let key = if s1n < s2n {
+                                    (s1n.clone(), s2n.clone(), pn.clone())
+                                } else {
+                                    (s2n.clone(), s1n.clone(), pn.clone())
+                                };
+                                if seen_intersections.contains(&key) {
+                                    continue;
+                                }
+                                seen_intersections.insert(key);
+                                facts.add(
+                                    Claim::pred(
+                                        "IsIntersection",
+                                        &[pn.clone(), s1n.clone(), s2n.clone()],
+                                        Value::Bool(true),
+                                    ),
+                                    Origin::Input,
+                                );
+                                // Create a named alias so the prover can reference it.
+                                let int_name = format!("T_{}", next_int);
+                                next_int += 1;
+                                facts.add(Claim::On(int_name.clone(), s1n.clone()), Origin::Input);
+                                facts.add(Claim::On(int_name.clone(), s2n.clone()), Origin::Input);
+                                facts.add(Claim::OnSegment(int_name.clone(), s1n.clone()), Origin::Input);
+                                facts.add(Claim::OnSegment(int_name.clone(), s2n.clone()), Origin::Input);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Run the global fact-derivation pipeline (transitive closures, geometric
@@ -365,9 +494,6 @@ pub fn derive_global_facts(facts: &mut FactStore) {
     circle_membership_closure(facts);
 }
 
-
-/// Transitive closure of segment-equality facts via union-find: if AB=CD and
-/// CD=EF are known, materialize AB=EF (bounded per equivalence class).
 pub fn seg_eq_closure(facts: &mut FactStore) {
     const MAX_GROUP: usize = 24;
     let eqs: Vec<(String, String)> = facts
@@ -889,6 +1015,9 @@ pub fn check(file: &File) -> Vec<Diagnostic> {
 
     derive_global_facts(&mut facts);
 
+    // Spam internal points to expand the set of marked points.
+    // spam_internal_points(&mut facts);
+
     diags.extend(apply_proofs(file, &mut facts));
 
     check_goals(file, &facts, &mut diags);
@@ -1290,11 +1419,7 @@ fn process_construction(
                             facts.add(Claim::OnSegment(n_norm.clone(), seg_n), Origin::Input);
                         } else if let Some((point, base)) = known.get(&Claim::norm_ref(r)) {
                             // A named perpendicular line `L = PerpendicularLine(point, base)`:
-                            // the intersection point lies on the base, and the
-                            // segment from `point` to it is perpendicular to the base.
-                            let base_n = Claim::norm_seg(base);
-                            facts.add(Claim::On(n_norm.clone(), base_n.clone()), Origin::Input);
-                            facts.add(Claim::OnSegment(n_norm.clone(), base_n), Origin::Input);
+                            // the segment from `point` to the intersection is perpendicular to the base.
                             let seg = Claim::seg_key(point, &n_norm);
                             facts.add(
                                 Claim::pred(
@@ -1316,11 +1441,7 @@ fn process_construction(
                         }
                     }
                     Geom::PerpendicularLine { point, base, .. } => {
-                        // The point lies on the base, and the perpendicular
-                        // through `point` to the base is perpendicular to it.
-                        let base_n = Claim::norm_seg(base);
-                        facts.add(Claim::On(n_norm.clone(), base_n.clone()), Origin::Input);
-                        facts.add(Claim::OnSegment(n_norm.clone(), base_n), Origin::Input);
+                        // The segment from `point` to the intersection is perpendicular to the base.
                         let seg = Claim::seg_key(point, &n_norm);
                         facts.add(
                             Claim::pred(
@@ -1426,13 +1547,32 @@ fn process_construction(
         Geom::AngleBisector { vertex, base, pos: bpos } => {
             // `D = AngleBisector(A, BC)`: the foot of the A-bisector on BC.
             // The bisected angle is `BAC` (vertex in the middle).
-            let seg = Claim::seg_key(vertex, &n);
+            // `D = AngleBisector(ABC, AH)`: triangle vertex opposite `AH`,
+            // i.e. `B` — used as `K = AngleBisector(ABH, AH)`.
+            let (vertex, base_angle_arms) = if vertex.chars().count() == 3
+                && base.chars().count() == 2
+            {
+                let tri: Vec<char> = vertex.to_lowercase().chars().collect();
+                let base_c: Vec<char> = base.to_lowercase().chars().collect();
+                let apex = tri.iter().find(|c| !base_c.contains(c)).copied();
+                match apex {
+                    Some(v) => (v.to_string(), Some(base_c)),
+                    None => (vertex.clone(), None),
+                }
+            } else {
+                (vertex.clone(), None)
+            };
+            let seg = Claim::seg_key(&vertex, &n);
             let v = vertex.to_lowercase();
-            let arms: Vec<char> = base.to_lowercase().chars().collect();
-            let angle = if arms.len() == 2 {
+            let angle = if let Some(arms) = base_angle_arms {
                 format!("{}{}{}", arms[0], v, arms[1])
             } else {
-                format!("{}{}", v, base.to_lowercase())
+                let arms: Vec<char> = base.to_lowercase().chars().collect();
+                if arms.len() == 2 {
+                    format!("{}{}{}", arms[0], v, arms[1])
+                } else {
+                    format!("{}{}", v, base.to_lowercase())
+                }
             };
             facts.add(
                 Claim::pred("IsAngleBisector", &[seg.clone(), angle], Value::Bool(true)),
@@ -1680,6 +1820,11 @@ fn process_chain(
                 if ok {
                     return;
                 }
+                if crate::symbolic::law_of_cosines_proof(items, facts).is_some()
+                    || crate::symbolic::rectangle_diagonal_proof(items, facts).is_some()
+                {
+                    return;
+                }
             }
             diags.push(Diagnostic::error(
                 span_of(expr.pos(), expr_len(expr)),
@@ -1721,6 +1866,14 @@ fn process_chain(
             if crate::symbolic::ratio_solves(p, facts) {
                 continue;
             }
+        }
+        // Generated proof chains may expose a derived premise before the
+        // corresponding conclusion is recorded in this checker pass.  Accept
+        // it when the ordinary prover can reconstruct it from current facts;
+        // this keeps rendered fallback derivations executable rather than
+        // treating the prover's saturated cache as an implicit fact.
+        if crate::prover::prove(p, facts, &crate::rules::rule_base(), 0).is_some() {
+            continue;
         }
         diags.push(
             Diagnostic::error(
@@ -1900,6 +2053,12 @@ fn establish(
             }
         }
     }
+    if !applied {
+        let rules = crate::rules::rule_base();
+        if crate::prover::prove(goal, facts, &rules, 0).is_some() {
+            applied = true;
+        }
+    }
 
     if applied {
         facts.add(goal.clone(), Origin::Proof(proof_index, step_num));
@@ -2019,11 +2178,17 @@ fn check_goals(file: &File, facts: &FactStore, diags: &mut Vec<Diagnostic>) {
                 if matches!(a, Claim::PredVal { .. }) {
                     let facts_all = facts.all();
                     let mut found = false;
+                    // Try AA-similarity via prover.
+                    if crate::prover::prove_similarity_aa(a, facts).is_some() {
+                        found = true;
+                    }
+                    if !found {
                     for rule in rule_base() {
                         if !apply_rule(&rule, &facts_all, &[], a).is_empty() {
                             found = true;
                             break;
                         }
+                    }
                     }
                     if found {
                         continue;
@@ -2194,7 +2359,4 @@ pub fn atom_display_strings(expr: &ClaimExpr) -> Vec<String> {
         _ => vec![render_expr(expr)],
     }
 }
-
-
-
 

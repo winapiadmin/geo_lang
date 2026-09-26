@@ -420,6 +420,11 @@ fn parse_predicate(line: &str, section: &str, path: &Path) -> Result<PClaim, Str
         let left = pexpr_to_ratio_expr(&args[0]);
         let right = pexpr_to_ratio_expr(&args[1]);
         Ok(PClaim::RatioEq(left, right))
+    } else if name_lower == "radius" {
+        if args.len() != 2 {
+            return Err(format!("{}: {section}: RadiusEq needs 2 args", path.display()));
+        }
+        Ok(PClaim::RadiusEq(args[0].clone(), args[1].clone()))
     } else if name_lower == "on" {
         if args.len() != 2 {
             return Err(format!("{}: {section}: On needs 2 args", path.display()));
@@ -438,7 +443,7 @@ fn parse_predicate(line: &str, section: &str, path: &Path) -> Result<PClaim, Str
         || name_lower == "issimilar" || name_lower == "isisosceles"
         || name_lower == "isright" || name_lower == "isparallelogram"
         || name_lower == "iscollinear" || name_lower == "isacute"
-        || name_lower == "iscirclecenter"
+        || name_lower == "iscirclecenter" || name_lower == "oncircle"
         || name_lower == "parallelogram" {
         Ok(PClaim::PredVal(name.to_lowercase(), args, Value::Bool(true)))
     } else if name_lower == "onsamecircle" {

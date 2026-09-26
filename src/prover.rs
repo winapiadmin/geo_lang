@@ -42,6 +42,15 @@ fn claims_equiv(a: &Claim, b: &Claim) -> bool {
                 a1 == a2
             }
         }
+        // `a/b = c/d` is the same statement as `c/d = a/b` — without this,
+        // the cycle guard can miss a goal reappearing in swapped form (e.g.
+        // via ratio-to-similarity's antecedent search), letting backward
+        // search wander into a pointless self-referential chain that just
+        // restates the same ratio as an unexplained "fact" instead of
+        // stopping immediately.
+        (Claim::RatioEq(l1, r1), Claim::RatioEq(l2, r2)) => {
+            (l1 == l2 && r1 == r2) || (l1 == r2 && r1 == l2)
+        }
         _ => a == b,
     }
 }
@@ -235,6 +244,7 @@ pub fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>, 
         // (on the first pass every fact counts as novel).
         let mut out = Vec::new();
         let mut seen: std::collections::HashSet<Claim> = std::collections::HashSet::new();
+        let mut same_circle_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (bind, dcount, _used) in cur {
             if !first_pass && dcount == 0 {
                 continue;
@@ -274,12 +284,52 @@ pub fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>, 
             }
             for bind in req_binds {
                 let c = instantiate(&rule.consequent, &bind);
-                if !c.has_unbound() && !is_degenerate(&c) && seen.insert(c.clone()) {
-                    out.push(c);
+                if !c.has_unbound() && !is_degenerate(&c) && !contains_sentinel(&c) {
+                    if let Claim::OnSameCircle(pts) = &c {
+                        let mut sorted = pts.clone();
+                        sorted.sort();
+                        if same_circle_seen.insert(format!("onsamecircle|{}", sorted.join(","))) {
+                            out.push(c);
+                        }
+                    } else if seen.insert(c.clone()) {
+                        out.push(c);
+                    }
                 }
             }
         }
         out
+    }
+
+    fn contains_sentinel(c: &Claim) -> bool {
+        use crate::claim::Claim::*;
+        match c {
+            OnSameCircle(pts) => pts.iter().any(|p| p.contains(':') || p.starts_with("radius")),
+            PredVal { args, .. } => args.iter().any(|a| a.contains(':') || a.starts_with("radius")),
+            SegEq(a, b) | RadiusEq(a, b) | TriEq(a, b) | AngleEq(a, b) => {
+                a.contains(':') || a.starts_with("radius") || b.contains(':') || b.starts_with("radius")
+            }
+            LenEq(a, _) | SqEq(a, _) => a.contains(':') || a.starts_with("radius"),
+            RatioEq(l, r) => {
+                fn check_ratio(e: &crate::claim::RatioExpr) -> bool {
+                    use crate::claim::RatioExpr::*;
+                    match e {
+                        Seg(s) => s.contains(':') || s.starts_with("radius"),
+                        Quot { num, den } => check_ratio_atom(num) || check_ratio_atom(den),
+                    }
+                }
+                fn check_ratio_atom(a: &crate::claim::RatioAtom) -> bool {
+                    use crate::claim::RatioAtom::*;
+                    match a {
+                        Seg(s) => s.contains(':') || s.starts_with("radius"),
+                        Int(_) => false,
+                    }
+                }
+                check_ratio(l) || check_ratio(r)
+            }
+            On(p, s) | OnSegment(p, s) | OnLine(p, s) | IsoscelesAt(s, p) => {
+                p.contains(':') || p.starts_with("radius") || s.contains(':') || s.starts_with("radius")
+            }
+        }
     }
 
     // Gather all facts whose shape could possibly match `ant` (conservative:
@@ -299,6 +349,7 @@ pub fn saturate_toward(facts: &FactStore, rules: &[Rule], goal: Option<&Claim>, 
             P::TriEq(_, _) => vec!["trieq".into()],
             P::AngleEq(_, _) => vec!["angle".into()],
             P::RatioEq(_, _) => vec!["ratio".into()],
+            P::RadiusEq(_, _) => vec!["radius".into()],
             P::OnSameCircle(v) => vec![format!("circ|{}", v.len())],
         };
         for k in keys {
@@ -887,6 +938,9 @@ fn prove_rec(
                 }
                 ratio_bound(l, bind) && ratio_bound(r, bind)
             }
+            PClaim::RadiusEq(a, b) => {
+                expr_vars(a, bind) && expr_vars(b, bind)
+            }
             PClaim::PredVal(_, args, _) | PClaim::PredAt(_, args, _) => {
                 args.iter().all(|a| expr_vars(a, bind))
             }
@@ -1000,10 +1054,22 @@ fn prove_rec(
         for bind in match_pat(goal, &rule.consequent, &HashMap::new()) {
 // Partition per-bind: SegEq antecedents with still-free pattern vars
             // (e.g. center O in SegEq(Seg2(O,A),Seg2(O,B))) must join
-            // structurally to bind them from facts. RatioEq is always
-            // symbolic — its antecedents are numeric, never matched
-            // structurally against the fact store.
-            let (structural, symbolic): (Vec<_>, Vec<_>) = rule
+            // structurally to bind them from facts. RatioEq antecedents are
+            // symbolic by default — numeric-checkable once their vars are
+            // bound — but a "bridge" variable used only between two RatioEq
+            // antecedents (e.g. E/F=G/H shared by both of ratio-transitivity's
+            // antecedents, appearing in neither the consequent nor any other
+            // antecedent) can never get bound that way; those still need a
+            // structural store-join, handled as a rescue pass below rather
+            // than reclassifying every under-bound RatioEq eagerly — doing
+            // that unconditionally would also catch cases like invthales'
+            // RatioEq(AD/DB,AE/EC), whose only free variable (A) *is*
+            // resolved by an ordinary structural antecedent (On(D,Seg2(A,B)))
+            // in the same rule, and forcing it into a literal store-lookup
+            // instead of the numeric check it needs (`numeric_proof`) would
+            // make it unprovable whenever no fact happens to restate the
+            // exact ratio verbatim.
+            let (structural, mut symbolic): (Vec<_>, Vec<_>) = rule
                 .antecedents
                 .iter()
                 .enumerate()
@@ -1027,6 +1093,34 @@ fn prove_rec(
                 cur = next;
                 if cur.is_empty() {
                     break;
+                }
+            }
+
+            // Rescue pass: any nominally-symbolic antecedent that is *still*
+            // unbound after the ordinary structural join above (a genuine
+            // bridge variable, not resolvable any other way) gets joined
+            // structurally too, and is removed from `symbolic` so the
+            // per-bind loop below doesn't also try to instantiate it with
+            // unbound variables.
+            if !cur.is_empty() {
+                let sample = cur[0].clone();
+                let (still_free, resolvable): (Vec<_>, Vec<_>) =
+                    symbolic.into_iter().partition(|(_, a)| !pattern_vars_bound(a, &sample));
+                symbolic = resolvable;
+                for ant in still_free.iter().map(|(_, a)| *a) {
+                    let mut next: Vec<Bindings> = Vec::new();
+                    for b in &cur {
+                        for f in &store_snapshot {
+                            next.extend(match_pat(&f, ant, b));
+                        }
+                        if next.len() > MAX_BINDINGS {
+                            break;
+                        }
+                    }
+                    cur = next;
+                    if cur.is_empty() {
+                        break;
+                    }
                 }
             }
 
@@ -1114,6 +1208,24 @@ fn prove_rec(
                         continue;
                     }
                     if saturated.contains(&inst) {
+                        // `inst` isn't a genuine base fact — it was derived
+                        // during forward saturation (e.g. a RatioEq chained
+                        // through metric-relations / angle-bisector-theorem /
+                        // transitivity). Rendering it as a bare `[fact]` leaf
+                        // falsely presents it as an unexplained given, and
+                        // can make an otherwise-sound chain look circular
+                        // (the same relation appearing to justify itself).
+                        // Try to recursively explain it first; only fall
+                        // back to an unexplained leaf if that fails (e.g.
+                        // depth exhausted or genuinely no rule chain found).
+                        if depth > 0 {
+                            if let Some(sub) =
+                                prove_rec(&inst, saturated, rules, base, depth - 1, &ancestors, disabled)
+                            {
+                                parts.push((pos, sub));
+                                continue;
+                            }
+                        }
                         parts.push((pos, Proof::leaf(inst)));
                         continue;
                     }
@@ -1131,6 +1243,38 @@ fn prove_rec(
                         claim: goal.clone(),
                         antecedents: parts.into_iter().map(|(_, p)| p).collect(),
                         rule: Some(rule.id),
+                    });
+                }
+            }
+        }
+    }
+
+    // A ratio equality is reciprocal-invariant: a/b = c/d holds exactly
+    // when b/a = d/c does. Forward saturation's `ratio-transitivity` chains
+    // can land on either orientation (e.g. deriving `AK/KH = BC/AB` doesn't
+    // stop it from also being read as `AB/BC = KH/AK`), but backward search
+    // above only tries the goal's literal orientation, so a goal landing on
+    // the "other" side of such a chain can fail here even though its
+    // reciprocal is provable. Try that before giving up on a real
+    // derivation and falling back to an unexplained `[fact]` leaf.
+    if let Claim::RatioEq(lhs, rhs) = goal {
+        fn reciprocal(e: &RatioExpr) -> Option<RatioExpr> {
+            match e {
+                RatioExpr::Quot { num, den } => Some(RatioExpr::Quot {
+                    num: den.clone(),
+                    den: num.clone(),
+                }),
+                RatioExpr::Seg(_) => None,
+            }
+        }
+        if let (Some(rl), Some(rr)) = (reciprocal(lhs), reciprocal(rhs)) {
+            let recip_goal = Claim::ratio_eq(&rl, &rr);
+            if !ancestors.iter().any(|a| claims_equiv(a, &recip_goal)) {
+                if let Some(sub) = prove_rec(&recip_goal, saturated, rules, base, depth, &ancestors, disabled) {
+                    return Some(Proof {
+                        claim: goal.clone(),
+                        antecedents: vec![sub],
+                        rule: Some("ratio-reciprocal"),
                     });
                 }
             }
